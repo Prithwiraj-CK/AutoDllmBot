@@ -65,6 +65,16 @@ def sol_usd():
     return cached("sol", 300, lambda: (get(f"{DATAPI}/pools/{SOL_USDC}") or {}).get("current_price") or 150.0)
 
 
+def jup_usd(mint):
+    """Token price in USD from Jupiter (all venues), to cross-check the pool's own price."""
+    def fetch():
+        try:
+            return float((get(f"https://lite-api.jup.ag/price/v3?ids={mint}") or {}).get(mint, {}).get("usdPrice") or 0) or None
+        except Exception:
+            return None
+    return cached(f"jup:{mint}", 60, fetch)
+
+
 def series(pool, kind, start, tf="5m"):
     d = get(f"{DATAPI}/pools/{pool}/{kind}?timeframe={tf}&start_time={int(start)}&end_time={int(time.time())}") or {}
     return d.get("data") or []
@@ -312,6 +322,32 @@ def close_leg(pos, leg, price, mode):
     return sol + sell + leg["fee_sol"] - leg["size"] - TX_SOL
 
 
+def snapshot(pos, price):
+    """The position the way Meteora shows it: what's in it now at the pool price, fees earned, what it's worth vs
+    what went in, in SOL and USD, plus the pool price checked against Jupiter."""
+    leg, first, s = pos["legs"][-1], pos["legs"][0], sol_usd()
+    sol, tok = M.holdings(leg["bins"], price)
+    pnl = campaign_pnl(pos, price)
+    worth = first["size"] * (1 + pnl)
+    jup = jup_usd(pos["mint"]) if pos.get("mint") else None
+    return {"pnl": pnl, "fee": sum(l["fee_sol"] for l in pos["legs"]) / first["size"], "price_vs_entry": price / first["p0"] - 1,
+            "sol": sol, "tok": tok, "tok_sol": tok * price, "fees_sol": sum(l["fee_sol"] for l in pos["legs"]), "worth": worth,
+            "in_sol": first["size"], "in_usd": first["usd"], "now_usd": worth * s, "price_sol": price, "price_usd": price * s,
+            "entry_price_usd": first["p0"] * first["usd"] / first["size"], "jup_usd": jup,
+            "gap_pct": (price * s / jup - 1) * 100 if jup else None}
+
+
+def money_lines(name, mk):
+    sym = name.split("-")[0]
+    lines = [f"deposited **{mk['in_sol']:.4f} SOL** (${mk['in_usd']:,.2f}) · now worth **{mk['worth']:.4f} SOL** (${mk['now_usd']:,.2f})",
+             f"holding {mk['sol']:.4f} SOL + {mk['tok']:,.2f} {sym} ({mk['tok_sol']:.4f} SOL) + fees earned {mk['fees_sol']:.4f} SOL",
+             f"P&L **{mk['worth'] - mk['in_sol']:+.4f} SOL ({mk['pnl'] * 100:+.2f}%)** · in USD {mk['now_usd'] - mk['in_usd']:+,.2f} "
+             f"({(mk['now_usd'] / mk['in_usd'] - 1) * 100:+.2f}%, includes SOL's own move)",
+             f"{sym} ${mk['price_usd']:.4g} ({mk['price_vs_entry'] * 100:+.1f}% since entry at ${mk['entry_price_usd']:.4g})"
+             + (f" · Jupiter ${mk['jup_usd']:.4g} (pool {mk['gap_pct']:+.1f}%)" if mk.get("jup_usd") else "")]
+    return lines
+
+
 def campaign_pnl(pos, price):
     leg, stake = pos["legs"][-1], pos["legs"][0]["size"]
     return (sum(l["result"] for l in pos["legs"][:-1]) + M.value(leg["bins"], price) + leg["fee_sol"] - leg["size"]) / stake
@@ -332,7 +368,7 @@ def triggers_text(t):
 def finish(pos, state, reason, revisit_min=60):
     held = (time.time() - pos["t"]) / 3600
     pnl = sum(l["result"] for l in pos["legs"])
-    stake = pos["legs"][0]["size"]
+    stake, s = pos["legs"][0]["size"], sol_usd()
     c = {"book": "ai", "name": pos["name"], "pool": pos["pool"], "strategy": pos["plan"]["strategy"],
          "setup": f"{pos['legs'][0]['shape']} {pos['legs'][0]['lo']:.0f}%..+{pos['legs'][0]['hi']:.0f}%", "legs": len(pos["legs"]),
          "entry_t": pos["t"], "exit_t": time.time(), "held_h": round(held, 2), "exit": reason, "pnl_sol": pnl,
@@ -346,7 +382,9 @@ def finish(pos, state, reason, revisit_min=60):
     book = [x for x in state["closed"] if x["book"] == "ai"]
     post({"content": f"**{TAG} · ⏹️ closed {pos['name']}** · after {held:.1f}h",
           "embeds": [{"color": 0x26A69A if pnl >= 0 else 0xEF5350, "description": "\n".join([
-              f"result: **{pnl:+.4f} SOL ({c['pnl_pct']:+.2f}%)** on {stake:g} SOL · fees {c['fees_sol']:+.4f}"
+              f"deposited **{stake:.4f} SOL** (${pos['legs'][0]['usd']:,.2f}) · got back **{stake + pnl:.4f} SOL** (${(stake + pnl) * s:,.2f})",
+              f"P&L **{pnl:+.4f} SOL ({c['pnl_pct']:+.2f}%)** · in USD {(stake + pnl) * s - pos['legs'][0]['usd']:+,.2f} · "
+              f"fees earned {c['fees_sol']:.4f} SOL · token sold at the pool's real swap quote"
               + (f" · {len(pos['legs'])} legs (re-centered {len(pos['legs']) - 1}x)" if len(pos["legs"]) > 1 else ""),
               f"why: {reason}",
               f"total so far: {sum(x['pnl_sol'] for x in book):+.4f} SOL over {len(book)} campaign(s), "
@@ -361,13 +399,15 @@ def enter(m, plan, state, mode, alert):
     if not leg:
         return why
     key = f"ai:{m['pool']}"
-    state["open"][key] = {"key": key, "book": "ai", "mode": mode, "pool": m["pool"], "name": m["name"], "flip": m["flip"],
+    state["open"][key] = {"key": key, "book": "ai", "mode": mode, "pool": m["pool"], "name": m["name"], "flip": m["flip"], "mint": m["mint"],
                           "bin_step": m["bin_step"], "t": leg["t"], "plan": plan, "legs": [leg], "entry_tvl": m["tvl"],
                           "last_review": time.time(), "review_price": leg["p0"], "review_low": 0.0,
                           "source": "alert" if alert else "scan"}
     post({"content": f"**{TAG} · ▶️ entered {m['name']}**",
           "embeds": [{"color": 0x9C27B0, "description": "\n".join([
-              f"{size:g} SOL · **{setup_text(leg)}** · {plan['strategy']}",
+              f"deposited **{size:g} SOL** (${leg['usd']:,.2f}) · **{setup_text(leg)}** · {plan['strategy']}",
+              f"{m['name'].split('-')[0]} at ${leg['p0'] * sol_usd():.4g} (on-chain active bin)"
+              + (f" · Jupiter ${jup_usd(m['mint']):.4g}" if jup_usd(m["mint"]) else ""),
               f"from {'feed alert' if alert else 'busy-pool scan'} · pool {m['age_h']:.0f}h old · 1h vol ${m['vol_1h'] / 1e3:,.0f}K · "
               f"1h {m['chg_1h_pct']:+.0f}%",
               f"watching: {triggers_text(plan['triggers'])}",
@@ -409,10 +449,11 @@ def manage(pos, state, mode):
     if not p:
         return
     price = 1 / p if pos["flip"] else p
-    pnl = campaign_pnl(pos, price)
+    if not pos.get("mint"):
+        pos["mint"] = info["token_y" if pos["flip"] else "token_x"]["address"]
     t = pos["plan"]["triggers"]
-    pos["mark"] = {"pnl": pnl, "fee": sum(l["fee_sol"] for l in pos["legs"]) / pos["legs"][0]["size"],
-                   "price_vs_entry": price / pos["legs"][0]["p0"] - 1}
+    pos["mark"] = snapshot(pos, price)
+    pnl = pos["mark"]["pnl"]
     if (info.get("tvl") or 0) < GUARD["pulled"] * pos["entry_tvl"]:
         return close_campaign(pos, state, mode, price, "liquidity pulled (guardrail)", 240)
     if t["take_profit_pct"] and pnl * 100 >= t["take_profit_pct"]:
@@ -474,10 +515,11 @@ def post_status(state):
     lines = [f"closed {len(cl)} · {sum(c['pnl_sol'] > 0 for c in cl)} green · total **{sum(c['pnl_sol'] for c in cl):+.4f} SOL**"
              + (f" · avg {sum(c['pnl_pct'] for c in cl) / len(cl):+.2f}%" if cl else ""), ""]
     for p in state["open"].values():
-        mk = p.get("mark") or {}
-        lines.append(f"**{p['name']}** · {(time.time() - p['t']) / 3600:.1f}h · {setup_text(p['legs'][-1])} · "
-                     f"now {mk.get('pnl', 0) * 100:+.1f}% (fees {mk.get('fee', 0) * 100:+.1f}%) · legs {len(p['legs'])}")
-    lines += ["", f"AI calls today: {state.get('ai_calls', {}).get('n', 0)} · open marks are the model before the token sale"]
+        lines.append(f"**{p['name']}** · {(time.time() - p['t']) / 3600:.1f}h · {setup_text(p['legs'][-1])} · legs {len(p['legs'])}")
+        lines += money_lines(p["name"], p["mark"]) if (p.get("mark") or {}).get("worth") else ["not marked yet"]
+        lines.append("")
+    lines += [f"AI calls today: {state.get('ai_calls', {}).get('n', 0)} · open values use the pool price like Meteora does; "
+              "a close also pays the swap impact of selling the token"]
     post({"content": f"**{TAG} · 🧪 paper · 📋 positions update** · {len(state['open'])} open",
           "embeds": [{"color": 0x787B86, "description": "\n".join(lines)[:4000]}]})
 
