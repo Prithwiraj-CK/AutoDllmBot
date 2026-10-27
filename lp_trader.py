@@ -20,7 +20,7 @@ Paper (default) sends nothing on chain: the on-chain active bin is the entry pri
 share of the pool's real 5m fees, and closes price the token sale with a real swap quote.
 Live: LP_TRADER_LIVE=1 with LP_BOT_KEYPAIR (set by the owner) trades on chain through lp_exec.
 
-Env: LP_TRADER_SIZE_SOL (1), LP_TRADER_MAX_OPEN (6), LP_TRADER_AI_MAX_CALLS (150 a day), LP_TRADER_STATUS_HOURS (6),
+Env: LP_TRADER_SIZE_SOL (1), LP_TRADER_MAX_OPEN (6), LP_TRADER_AI_MAX_CALLS (150 a day), LP_TRADER_STATUS_HOURS (1),
 LP_TRADER_MODEL (sonnet), LP_TRADER_LIVE, LP_BOT_LIVE_MAX_SOL (0.25), LP_BOT_RESERVE_SOL (0.1), LP_BOT_DAILY_LOSS_SOL (1.0),
 LP_BOT_WEBHOOK_URL.
 """
@@ -578,7 +578,7 @@ def main():
                 STATE.write_text(json.dumps(state))
         except Exception as e:
             print(f"candidate pass failed: {e}", flush=True)
-        if time.time() - state["last_status"] > env("LP_TRADER_STATUS_HOURS", 6.0) * 3600:
+        if time.time() - state["last_status"] > env("LP_TRADER_STATUS_HOURS", 1.0) * 3600:
             state["last_status"] = time.time()
             post_status(state)
         state["revisit"] = {k: v for k, v in state["revisit"].items() if v > time.time()}
