@@ -1,0 +1,9 @@
+{
+  "name": "lp-exec",
+  "private": true,
+  "type": "module",
+  "description": "Opens/closes Meteora DLMM positions for lp_bot.py (live mode only)",
+  "dependencies": {
+    "@meteora-ag/dlmm": "1.9.14"
+  }
+}

@@ -1,0 +1,8 @@
+out/
+__pycache__/
+.venv/
+.env
+lp_exec/node_modules/
+*keypair*.json
+wallet*.json
+.DS_Store
