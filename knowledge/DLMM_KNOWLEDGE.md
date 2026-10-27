@@ -613,7 +613,8 @@ The bot cannot open token-only ranges or two-layer hybrids; for those, pick the 
   a SuperTrend flip); 30–120 min for a hot pool that only cooled, a day for a coin you rejected on holders.
 
 ### 18.8 Mistakes already made (don't repeat)
-- A −0.5% stop on a −90% range (Nothing-SOL): the stop sat inside ordinary noise for that range.
+- A −0.5% stop on a −90% range (Nothing-SOL) sat inside ordinary noise for that range. Cause: the bot read a stop
+  written as −5 as 0.5 (fixed: stops and take-profits are sizes, 5 = −5%). Check stops against `value_pct_if_price`.
 - Two positions in one token (two LAUNCH pools): one campaign per token is now enforced.
 - Entering at market right after a +160% 6 h pump with part of the range above price.
 - Judging wide ranges by the old fee formula: 1 SOL over 236 bins earned ~0.04%/h, not ~0.2%/h.

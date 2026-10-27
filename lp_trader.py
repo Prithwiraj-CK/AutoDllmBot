@@ -257,7 +257,7 @@ SETUP_KEYS = """ "shape": "Spot" | "Bid-Ask" | "Curve",
 TRIGGERS = """ "wake_move_pct": number 2..50 (wake me when price moves this far either way since my last look),
  "cold_volume_30m": integer USD (wake me when 30-min pool volume drops below this),
  "max_hold_h": number 0.5..72 (wake me once held this long),
- "take_profit_pct": number or null, "stop_loss_pct": number or null (close automatically at this campaign %, fees included;
+ "take_profit_pct": positive number or null, "stop_loss_pct": positive number or null (5 = close at -5%; close automatically at this campaign %, fees included;
    check the value_pct_if_price column: a stop tighter than an ordinary pullback closes the trade on noise),"""
 CHECKLIST = """ "checklist": {"coin": "is the coin itself worth LPing (holders, linked wallets, flow, age)",
    "pool": "is this the right pool (fee tier, bin step, depth near price vs your size)",
@@ -351,8 +351,8 @@ def parse_triggers(a, old=None):
     if a.get("cold_volume_30m") is not None:
         t["cold_volume_30m"] = max(int(a["cold_volume_30m"]), 0)
     for k in ("take_profit_pct", "stop_loss_pct"):
-        if k in a:
-            t[k] = num(a, k, 0.5, 90)
+        if k in a:  # sizes, so a stop written as -5 means 5% (clamping -5 to 0.5 once set a 0.5% stop)
+            t[k] = None if a[k] is None else min(max(abs(float(a[k])), 0.5), 90)
     return t
 
 
