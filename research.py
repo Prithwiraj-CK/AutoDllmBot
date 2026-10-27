@@ -228,7 +228,7 @@ def chart(address, watermark="@SinClair_0000", badge=None, advisor=None, out_png
     p["rugcheck"] = rugcheck(p["base_token"]["mint"])
 
     age = p["pool_age_hours"]
-    if age < 12:  # young pool: 5m candles over its whole life, so the chart isn't one lonely bar
+    if age < 7.5:  # young pool: 5m candles over its whole life (the API serves at most ~8h of 5m candles per call)
         tf, hours = "5m", max(age + 0.5, 1.5)
     elif age < 72:
         tf, hours = "30m", 48
