@@ -3,6 +3,7 @@
 //   node lp_exec.mjs plan  <pool> <shape> <lo%> <hi%> <sol>     read-only: bin range, positions, rent cost
 //   node lp_exec.mjs quote <pool> <amount> [buy]                read-only: selling <amount> token for SOL, or with buy,
 //                                                               spending <amount> SOL on the token: amount out + price impact
+//   node lp_exec.mjs price <pool>                               read-only: token priced in SOL at the on-chain active bin
 //   node lp_exec.mjs wallet                                     public key + SOL balance of LP_BOT_KEYPAIR
 //   node lp_exec.mjs open  <pool> <shape> <lo%> <hi%> <sol> [--simulate]
 //   node lp_exec.mjs close <pool> [--simulate]                  withdraw + close every position in the pool, sell the token for SOL
@@ -214,13 +215,18 @@ async function close(address) {
 try {
   if (cmd === "plan") out(await plan(...args.slice(0, 5)));
   else if (cmd === "quote") { const { q, ...r } = await quote(args[0], args[1], args[2] || "sell"); out(r); }
+  else if (cmd === "price") {
+    const { dlmm, solIsX } = await pool(args[0]);
+    const perToken = Number((await dlmm.getActiveBin()).pricePerToken);
+    out({ ok: true, activeId: dlmm.lbPair.activeId, price: solIsX ? 1 / perToken : perToken });
+  }
   else if (cmd === "wallet") {
     const w = wallet();
     out({ ok: true, pubkey: w.publicKey.toBase58(), sol: (await conn.getBalance(w.publicKey)) / LAMPORTS_PER_SOL });
   }
   else if (cmd === "open") out(await open(...args.filter((a) => a !== "--simulate").slice(0, 5)));
   else if (cmd === "close") out(await close(args[0]));
-  else out({ ok: false, error: "usage: plan|quote|wallet|open|close (see top of file)" });
+  else out({ ok: false, error: "usage: plan|quote|price|wallet|open|close (see top of file)" });
 } catch (e) {
   out({ ok: false, error: e.message });
 }

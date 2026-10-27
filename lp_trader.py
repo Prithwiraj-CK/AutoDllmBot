@@ -7,8 +7,9 @@ leaves the range, after each further 5% drawdown, or every 2 hours. Then it hold
 or re-centers with a new range; after a close it says when the pool is worth another look.
 
 Guardrails in code (the AI can't override them): SOL pairs, freeze authority off, pool >= 6h old, >= $30K volume in the
-last hour, not down > 20% in the last hour, no rugcheck danger flags, never create bin arrays, close at once if the
-pool's liquidity drops below 40% of entry, max open positions, Claude call budget, live daily loss limit.
+last hour, not down > 20% in the last hour, no rugcheck danger flags, one campaign per token, never create bin arrays,
+close at once if the pool's liquidity drops below 40% of entry, max open positions, Claude call budget (the last 20% kept
+for reviews), live daily loss limit. Marks use the on-chain active bin price, like Meteora's UI.
 
 A "campaign" is one pool from first entry to final close; re-centers are legs inside it. Discord gets the entry, each
 re-center, the close, and a status update every LP_TRADER_STATUS_HOURS.
@@ -78,6 +79,12 @@ def jup_usd(mint):
 def series(pool, kind, start, tf="5m"):
     d = get(f"{DATAPI}/pools/{pool}/{kind}?timeframe={tf}&start_time={int(start)}&end_time={int(time.time())}") or {}
     return d.get("data") or []
+
+
+def onchain_price(pool):
+    """Token priced in SOL at the pool's active bin, read on chain; None if the RPC call fails."""
+    r = run_exec("price", pool)
+    return r.get("price") if r.get("ok") else None
 
 
 def market(pool):
@@ -191,13 +198,14 @@ def ask_claude(prompt):
     return json.loads(m.group(0))
 
 
-def ai_budget(state):
+def ai_budget(state, reserve=0.0):
+    """Count one Claude call against today's budget. Entries pass reserve=0.2 so the last 20% stays for reviews."""
     day = time.strftime("%Y-%m-%d", time.gmtime())
     b = state.setdefault("ai_calls", {})
     if b.get("day") != day:
         b.clear()
         b.update(day=day, n=0)
-    if b["n"] >= env("LP_TRADER_AI_MAX_CALLS", 150):
+    if b["n"] >= env("LP_TRADER_AI_MAX_CALLS", 150) * (1 - reserve):
         return False
     b["n"] += 1
     return True
@@ -285,7 +293,8 @@ def open_leg(m, setup, mode, size):
         res = run_exec("open", m["pool"], setup["shape"], lo, hi, size)
         if not res.get("ok"):
             return None, f"open failed: {res.get('error')}"
-        leg.update(sol_before=before, position=res.get("position"))
+        after = wallet_sol()
+        leg.update(sol_before=before, spent=before - after if after is not None else size, position=res.get("position"))
     return leg, None
 
 
@@ -294,6 +303,8 @@ def mark_leg(pos, leg):
     now = time.time()
     cs = series(pos["pool"], "ohlcv", leg["last_ts"] - 3600)
     vh = {v["timestamp"]: v for v in series(pos["pool"], "volume/history", leg["last_ts"] - 3600)}
+    if not vh:
+        return None  # data API gave nothing: unknown, not zero
     if pos["flip"]:
         cs = [dict(c, open=1 / c["open"], close=1 / c["close"], high=1 / c["low"], low=1 / c["high"]) for c in cs]
     vol = lambda ts, n: sum((vh.get(ts - 300 * i) or {}).get("volume") or 0 for i in range(n))
@@ -312,10 +323,14 @@ def mark_leg(pos, leg):
 def close_leg(pos, leg, price, mode):
     """Realised SOL result of one leg."""
     if mode == "live":
+        before = wallet_sol()
         res = run_exec("close", pos["pool"])
         if not res.get("ok"):
             raise RuntimeError(f"close failed: {res.get('error')}")
-        return wallet_sol() - leg["sol_before"]
+        after = wallet_sol()
+        if before is None or after is None:
+            raise RuntimeError("closed, but the wallet balance could not be read to book the result")
+        return after - before - leg.get("spent", leg["size"])
     sol, tok = M.holdings(leg["bins"], price)
     q = run_exec("quote", pos["pool"], tok) if tok > 0 else {"ok": True, "solOut": 0.0}
     sell = q["solOut"] if q.get("ok") else tok * price * 0.99
@@ -330,17 +345,24 @@ def snapshot(pos, price):
     pnl = campaign_pnl(pos, price)
     worth = first["size"] * (1 + pnl)
     jup = jup_usd(pos["mint"]) if pos.get("mint") else None
-    return {"pnl": pnl, "fee": sum(l["fee_sol"] for l in pos["legs"]) / first["size"], "price_vs_entry": price / first["p0"] - 1,
+    banked = sum(l["result"] - l["fee_sol"] for l in pos["legs"][:-1]) - (leg["size"] - first["size"])
+    return {"banked": banked, "pnl": pnl, "fee": sum(l["fee_sol"] for l in pos["legs"]) / first["size"], "price_vs_entry": price / first["p0"] - 1,
             "sol": sol, "tok": tok, "tok_sol": tok * price, "fees_sol": sum(l["fee_sol"] for l in pos["legs"]), "worth": worth,
             "in_sol": first["size"], "in_usd": first["usd"], "now_usd": worth * s, "price_sol": price, "price_usd": price * s,
             "entry_price_usd": first["p0"] * first["usd"] / first["size"], "jup_usd": jup,
             "gap_pct": (price * s / jup - 1) * 100 if jup else None}
 
 
+def link(name, pool):
+    return f"[{name}](https://app.meteora.ag/dlmm/{pool})"
+
+
 def money_lines(name, mk):
     sym = name.split("-")[0]
     lines = [f"deposited **{mk['in_sol']:.4f} SOL** (${mk['in_usd']:,.2f}) · now worth **{mk['worth']:.4f} SOL** (${mk['now_usd']:,.2f})",
-             f"holding {mk['sol']:.4f} SOL + {mk['tok']:,.2f} {sym} ({mk['tok_sol']:.4f} SOL) + fees earned {mk['fees_sol']:.4f} SOL",
+             f"holding {mk['sol']:.4f} SOL + {mk['tok']:,.2f} {sym} ({mk['tok_sol']:.4f} SOL) + fees earned {mk['fees_sol']:.4f} SOL"
+             + (f" · earlier legs {mk['banked']:+.4f} SOL on price moves and swaps"
+                if abs(mk.get("banked") or 0) >= 0.00005 else ""),
              f"P&L **{mk['worth'] - mk['in_sol']:+.4f} SOL ({mk['pnl'] * 100:+.2f}%)** · in USD {mk['now_usd'] - mk['in_usd']:+,.2f} "
              f"({(mk['now_usd'] / mk['in_usd'] - 1) * 100:+.2f}%, includes SOL's own move)",
              f"{sym} ${mk['price_usd']:.4g} ({mk['price_vs_entry'] * 100:+.1f}% since entry at ${mk['entry_price_usd']:.4g})"
@@ -381,7 +403,7 @@ def finish(pos, state, reason, revisit_min=60):
     state["revisit"][pos["pool"]] = time.time() + revisit_min * 60
     book = [x for x in state["closed"] if x["book"] == "ai"]
     post({"content": f"**{TAG} · ⏹️ closed {pos['name']}** · after {held:.1f}h",
-          "embeds": [{"color": 0x26A69A if pnl >= 0 else 0xEF5350, "description": "\n".join([
+          "embeds": [{"color": 0x26A69A if pnl >= 0 else 0xEF5350, "description": "\n".join([link("open on Meteora", pos["pool"]),
               f"deposited **{stake:.4f} SOL** (${pos['legs'][0]['usd']:,.2f}) · got back **{stake + pnl:.4f} SOL** (${(stake + pnl) * s:,.2f})",
               f"P&L **{pnl:+.4f} SOL ({c['pnl_pct']:+.2f}%)** · in USD {(stake + pnl) * s - pos['legs'][0]['usd']:+,.2f} · "
               f"fees earned {c['fees_sol']:.4f} SOL · token sold at the pool's real swap quote"
@@ -404,7 +426,7 @@ def enter(m, plan, state, mode, alert):
                           "last_review": time.time(), "review_price": leg["p0"], "review_low": 0.0,
                           "source": "alert" if alert else "scan"}
     post({"content": f"**{TAG} · ▶️ entered {m['name']}**",
-          "embeds": [{"color": 0x9C27B0, "description": "\n".join([
+          "embeds": [{"color": 0x9C27B0, "description": "\n".join([link("open on Meteora", m["pool"]),
               f"deposited **{size:g} SOL** (${leg['usd']:,.2f}) · **{setup_text(leg)}** · {plan['strategy']}",
               f"{m['name'].split('-')[0]} at ${leg['p0'] * sol_usd():.4g} (on-chain active bin)"
               + (f" · Jupiter ${jup_usd(m['mint']):.4g}" if jup_usd(m["mint"]) else ""),
@@ -430,7 +452,7 @@ def wake_reason(pos, price, v30, pnl):
         return "price fell below the range: the position is all token and earns nothing"
     if abs(move) >= t["wake_move_pct"]:
         return f"price moved {move:+.1f}% since your last look"
-    if v30 < t["cold_volume_30m"]:
+    if v30 is not None and v30 < t["cold_volume_30m"]:
         return f"30-min pool volume fell to ${v30:,.0f}"
     if pnl <= pos["review_low"] - 0.05:
         return f"drawdown deepened to {pnl * 100:+.1f}%"
@@ -445,25 +467,29 @@ def manage(pos, state, mode):
     leg = pos["legs"][-1]
     v30 = mark_leg(pos, leg)
     info = get(f"{DATAPI}/pools/{pos['pool']}") or {}
-    p = info.get("current_price")
-    if not p:
-        return
-    price = 1 / p if pos["flip"] else p
+    price = onchain_price(pos["pool"])
+    if not price:
+        p = info.get("current_price")
+        if not p:
+            return
+        price = 1 / p if pos["flip"] else p
     if not pos.get("mint"):
         pos["mint"] = info["token_y" if pos["flip"] else "token_x"]["address"]
     t = pos["plan"]["triggers"]
     pos["mark"] = snapshot(pos, price)
     pnl = pos["mark"]["pnl"]
-    if (info.get("tvl") or 0) < GUARD["pulled"] * pos["entry_tvl"]:
+    if info and (info.get("tvl") or 0) < GUARD["pulled"] * pos["entry_tvl"]:
         return close_campaign(pos, state, mode, price, "liquidity pulled (guardrail)", 240)
     if t["take_profit_pct"] and pnl * 100 >= t["take_profit_pct"]:
         return close_campaign(pos, state, mode, price, f"AI's take profit +{t['take_profit_pct']:g}%")
     if t["stop_loss_pct"] and pnl * 100 <= -t["stop_loss_pct"]:
         return close_campaign(pos, state, mode, price, f"AI's stop loss -{t['stop_loss_pct']:g}%", 240)
     why = wake_reason(pos, price, v30, pnl)
-    if not why or not ai_budget(state):
+    if not why:
         return
-    m = market(pos["pool"]) or {}
+    m = market(pos["pool"])
+    if not m or m.get("skip") or not ai_budget(state):
+        return
     status = {"strategy": pos["plan"]["strategy"], "range_now": setup_text(leg), "legs_so_far": len(pos["legs"]),
               "held_h": round((time.time() - pos["t"]) / 3600, 1), "campaign_pnl_pct_incl_fees": round(pnl * 100, 2),
               "fees_pct": round(pos["mark"]["fee"] * 100, 2), "price_vs_leg_entry_pct": round((price / leg["p0"] - 1) * 100, 1),
@@ -484,6 +510,9 @@ def manage(pos, state, mode):
     if act == "close":
         return close_campaign(pos, state, mode, price, f"AI: {reason}", revisit)
     pos["plan"]["triggers"] = parse_triggers(a, t)
+    held = (time.time() - pos["t"]) / 3600
+    if act == "hold" and pos["plan"]["triggers"]["max_hold_h"] <= held:
+        pos["plan"]["triggers"]["max_hold_h"] = round(held + REVIEW_EVERY_H, 1)
     if act != "recenter":
         return
     try:
@@ -515,7 +544,7 @@ def post_status(state):
     lines = [f"closed {len(cl)} · {sum(c['pnl_sol'] > 0 for c in cl)} green · total **{sum(c['pnl_sol'] for c in cl):+.4f} SOL**"
              + (f" · avg {sum(c['pnl_pct'] for c in cl) / len(cl):+.2f}%" if cl else ""), ""]
     for p in state["open"].values():
-        lines.append(f"**{p['name']}** · {(time.time() - p['t']) / 3600:.1f}h · {setup_text(p['legs'][-1])} · legs {len(p['legs'])}")
+        lines.append(f"**{link(p['name'], p['pool'])}** · {(time.time() - p['t']) / 3600:.1f}h · {setup_text(p['legs'][-1])} · legs {len(p['legs'])}")
         lines += money_lines(p["name"], p["mark"]) if (p.get("mark") or {}).get("worth") else ["not marked yet"]
         lines.append("")
     lines += [f"AI calls today: {state.get('ai_calls', {}).get('n', 0)} · open values use the pool price like Meteora does; "
@@ -561,7 +590,9 @@ def consider(pool, alert, state, mode):
         return
     m = market(pool)
     state["revisit"][pool] = time.time() + 30 * 60  # guardrail failures: look again in 30 min
-    if guard(m) or not ai_budget(state):
+    if guard(m) or any(p.get("mint") == m["mint"] for p in state["open"].values()):  # one campaign per token
+        return
+    if not ai_budget(state, reserve=0.2):
         return
     try:
         plan, skip_why, revisit = ai_entry(m, state, alert)
