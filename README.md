@@ -11,7 +11,7 @@ Meteora DLMM tooling: a Discord alert feed with research, a backtester, and an A
 | `lp_trader.py` | **AI trader.** Claude picks pools, range, shape and when to re-center, close or come back, from `knowledge/DLMM_KNOWLEDGE.md` and live data; code enforces the guardrails. Paper by default |
 | `lp_model.py` | Position model: bins, value, fee share calibrated on profitable wallets' real fees |
 | `lp_exec/lp_exec.mjs` | On-chain executor (Meteora DLMM SDK): plan, quote, open, close. Never creates bin arrays |
-| `lp_bot.py` | Older alert-following paper bot (finishing its last positions) |
+| `lp_bot.py` | Retired alert-following paper bot (final: 14 trades, −0.545 SOL); lp_trader reuses its helpers |
 | `send_discord.py` | Webhook sender |
 | `knowledge/DLMM_KNOWLEDGE.md` | Everything learned: LP Army course, community playbook, HawkFi models, wallet study, backtests (§17) |
 
