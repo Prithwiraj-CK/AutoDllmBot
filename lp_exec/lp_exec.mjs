@@ -3,7 +3,8 @@
 //   node lp_exec.mjs plan  <pool> <shape> <lo%> <hi%> <sol>     read-only: bin range, positions, rent cost
 //   node lp_exec.mjs quote <pool> <amount> [buy]                read-only: selling <amount> token for SOL, or with buy,
 //                                                               spending <amount> SOL on the token: amount out + price impact
-//   node lp_exec.mjs price <pool>                               read-only: token priced in SOL at the on-chain active bin
+//   node lp_exec.mjs price <pool> [n]                           read-only: token priced in SOL at the on-chain active bin; with n,
+//                                                               also the liquidity (in SOL) of the n bins each side of it
 //   node lp_exec.mjs wallet                                     public key + SOL balance of LP_BOT_KEYPAIR
 //   node lp_exec.mjs open  <pool> <shape> <lo%> <hi%> <sol> [--simulate]
 //   node lp_exec.mjs close <pool> [--simulate]                  withdraw + close every position in the pool, sell the token for SOL
@@ -216,9 +217,18 @@ try {
   if (cmd === "plan") out(await plan(...args.slice(0, 5)));
   else if (cmd === "quote") { const { q, ...r } = await quote(args[0], args[1], args[2] || "sell"); out(r); }
   else if (cmd === "price") {
-    const { dlmm, solIsX } = await pool(args[0]);
-    const perToken = Number((await dlmm.getActiveBin()).pricePerToken);
-    out({ ok: true, activeId: dlmm.lbPair.activeId, price: solIsX ? 1 / perToken : perToken });
+    const { dlmm, solIsX, token } = await pool(args[0]);
+    const n = Number(args[1] || 0);
+    const { activeBin, bins } = await dlmm.getBinsAroundActiveBin(n, n);
+    const act = bins.find((b) => b.binId === activeBin) || (await dlmm.getActiveBin());
+    const inSol = (perToken) => (solIsX ? 1 / perToken : perToken); // token priced in SOL
+    const dx = 10 ** (solIsX ? 9 : token.mint.decimals), dy = 10 ** (solIsX ? token.mint.decimals : 9);
+    const r = { ok: true, activeId: activeBin, price: inSol(Number(act.pricePerToken)) };
+    if (n) r.bins = bins.map((b) => {
+      const px = Number(b.pricePerToken), x = Number(b.xAmount.toString()) / dx, y = Number(b.yAmount.toString()) / dy;
+      return [b.binId, inSol(px), solIsX ? x + y / px : y + x * px]; // [bin id, token price in SOL, liquidity in SOL]
+    });
+    out(r);
   }
   else if (cmd === "wallet") {
     const w = wallet();

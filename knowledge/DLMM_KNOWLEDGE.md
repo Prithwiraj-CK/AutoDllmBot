@@ -2,7 +2,8 @@
 
 Everything learned while building @SinClair_0000's LP content: the LP Army Academy course,
 Meteora's docs and APIs, the community playbook from X, HawkFi's models, live pool research, and our
-own wallet study, backtests and paper trades (§17). `knowledge/lp-notes.md` is the short version
+own wallet study, backtests, paper trades and on-chain fee measurements (§17), and the decision playbook the AI
+trader follows (§18). `knowledge/lp-notes.md` is the short version
 the routines read; this is the full reference.
 
 ---
@@ -468,6 +469,9 @@ L), with competing liquidity **L ≈ $30K + 0.3 × the pool's 1h volume**, weigh
 sits in the bins that traded (Bid-Ask is thin near price, so it earns less there). That reproduces their
 average fee (≈3% per position for 5 min–24 h holds). Our old paper model (share = $ ÷ TVL) was in the
 same ballpark on average but not checked against reality before.
+**Correction (27 Oct 2026): this formula ignores how many bins a position covers.** It fits the wallets because
+they put 0.1–1 SOL in each bin. For 1 SOL spread over ~230 bins (−90%) it credited **4–9× the fees** that reading
+the real bin liquidity on chain gives (§17.6). Use §17.6 / §18.1, not this formula, for anything small or wide.
 
 ### 17.3 Backtests
 - **Our alert feed, 55 alerts, 5m candles**: holding 72 h loses (−$203 per $100 × 55); a small take-profit
@@ -483,6 +487,10 @@ same ballpark on average but not checked against reality before.
   Depth matters most: −80% → +2.5% (worst 2% −8%), −70% → +1.8% (worst 2% −24%). Pools ≥ 1 h instead of
   ≥ 6 h: worst 2% −17%. **Spot beat Bid-Ask** once fees were weighted by where liquidity sits.
   Caveat: a model, calibrated on averages; real results will be worse than a 95% win rate.
+  **Invalidated in part (27 Oct 2026):** this backtest used the §17.2 formula, which pays a −90% range the same
+  fees as a −50% one. That is why "deeper was better" here. With real per-bin shares a −90% Spot range earns
+  about ⅓–¼ of a −50% one per hour (§17.6). The pool filters, the "leave when volume dies" exit and the
+  "re-center when price runs above" rule still stand; the −90% depth does not, except as rug insurance.
 
 ### 17.4 Paper trading (alert-following bot, Oct 2026)
 - 7 of 7 take-profits closed +1.5% to +2.1%, most with price 16–35% **below** entry (fees covered it).
@@ -496,7 +504,7 @@ same ballpark on average but not checked against reality before.
 ### 17.5 Strategy menu by market condition (how the pieces fit)
 | Condition | Setup | Source |
 |---|---|---|
-| Hot pool (≥ $60K/h), ≥ 6 h old, not a falling knife | Spot +5%/−90%, re-center when price runs +6%, leave when volume dies, ≤ 12 h | §17.3, §17.1 |
+| Hot pool (≥ $60K/h), ≥ 6 h old, not a falling knife | Spot +5% down to −30…−60% (−90% earns ~¼ per hour, §17.6), re-center when price runs above, leave when volume dies, ≤ 12–24 h | §17.3, §17.6 |
 | Strong coin pumping near ATH, real volume, clean holders | SOL-sided Spot −86/−95% in a 5–10% pool after a 15m SuperTrend break; exit on RSI(2) > 90 + upper BB | §15.2 |
 | Dumped hard, now chopping sideways, still has buyers | Two-sided Bid-Ask (Bonus Stage), layer near lows, TP on pumps | §15.4 |
 | Price at the top of a calm range, steady flow | Hybrid (Spot near price + Bid-Ask below) or MCU-style Spot, up-only rebalance | §15.11, §15.12 |
@@ -504,3 +512,110 @@ same ballpark on average but not checked against reality before.
 | Pool < 1–6 h old | Skip, or tiny size with −99% and a 5–10% fee pool | §15.2, §17.1 |
 | Falling knife (1h < −20%), liquidity leaving, pool vs Jupiter gap > 10% | Skip / close | §17.1, §17.4, §15.11 |
 | Dry market, or Fri evening–Sat for slow cooks | Do less, smaller | §15.8, §15.11 |
+
+### 17.6 How fees really split: measured on chain (27 Oct 2026)
+Meteora pays each swap's fee to the liquidity in the bins it trades through, pro rata. So what you earn is
+**your SOL in the bins where price trades ÷ everyone's SOL in those bins** × the pool's LP fees. The bot now
+reads the bins around the active bin on chain every minute and books fees that way.
+- In the pools it traded, the bins near price held **8–23 SOL each**. 1 SOL Spot over 236 bins (−90%/+5%)
+  puts **0.004 SOL per bin**: a **0.02–0.05% share** of the fees. The old formula said 0.17–0.20%.
+- Same pool, same moment (LAUNCH, $295 LP fees/hour, 7.9 SOL per bin near price), 1 SOL:
+  Spot −15% → 0.6%/hour · Spot −30% → 0.27%/h · Spot −50% → 0.14%/h · Spot −90% → 0.04%/h ·
+  Curve −15/+5% → 1.6%/h. Bid-Ask earns almost nothing while price sits at the top of its range
+  (its SOL is in the bottom bins) and only starts earning once price falls into them.
+- The price for that: if price drops 20%, Spot −15% is worth −12.8% before fees, Spot −50% −3.2%, Spot −90% −1.0%.
+  Narrow earns more per hour and loses more per dip. **Profit = fees per hour × hours in range − value lost
+  to the move − swap costs of re-centering.** The profitable wallets win with ~70 bins and big size (0.1–1 SOL
+  per bin), re-centering many times a day.
+- Paper results before this date (the first AI trades) had their fees cut to the measured share.
+
+---
+
+## 18. Decision playbook (the AI trader follows this in order)
+
+The bot gets, per pool: MARKET facts (flow, fees, `chart_15m` signals, `holder_check`, `pool_vs_jupiter_pct`,
+age), an **OPTIONS** table built from the liquidity really sitting in this pool's bins (for each shape and range:
+bins, SOL per bin, fee share now, fees per hour if flow holds, value if price falls 20/50/80%, whether bin arrays
+exist), the swap cost, and its own track record. Work through the steps; any step can end in **skip**.
+
+### 18.1 Coin: is it worth LPing at all? (§6, §15.1, §15.2)
+Coin choice is most of the result. Warning signs, roughly in order of weight:
+- `holder_check.rugged`, rugcheck danger flags, freeze authority on → never (the code already blocks the last two).
+- **Linked wallets** (`linked_total_pct`): wallets funded or fed together. > 10–15% of supply in linked networks
+  = coordinated dump risk; you are exit liquidity. One network with hundreds of wallets is a bundle.
+- **Concentration**: `top10_pct` > 30% (pools and lockers already removed) or `top1_pct` > 10%.
+- `creator_holds_pct` > 5%, or a creator with many other tokens (serial launcher) on a young coin.
+- **Age**: under 1 h is where almost all of the wallets' big losses were (§17.1); 1–12 h only as `fresh-tiny`;
+  ≥ 12 h is what the teachers wait for (§15.2). Age is the AI's call; the code no longer blocks young pools.
+- **Pool vs Jupiter** (`pool_vs_jupiter_pct`): beyond ±5% arbs trade through you at the cheap side; beyond ±10% skip (§15.11).
+- Flow: buys/sells both active; volume that is huge vs liquidity with a flat price can be wash trading (§6).
+
+### 18.2 Pool: is this the right pool for the coin and for our size? (§15.3, §17.6)
+- Fees must pay for volatility: a coin moving 20%+ an hour wants a 1–2% base fee or more (5–10% on new coins,
+  §15.3). A 0.1–0.3% pool on a volatile coin pays too little for the risk.
+- `fee_tvl_1h_pct` and `lp_fees_1h_usd`: no fees, no point. 
+- **Depth near price vs our size**: `liquidity_per_bin_near_price_sol` against how much we'd put per bin. In a
+  pool with 20+ SOL per bin a 1 SOL wide range earns crumbs; only a narrow range competes there.
+- Bin arrays: a range that needs new arrays costs 0.07 SOL each, unrefunded; the code cuts the range to existing
+  arrays or skips (`needs_new_bin_arrays`).
+
+### 18.3 Market and timing: what is price doing? (§7, §9, §15.2, §15.8, §15.11)
+- **Falling knife** (1 h < −20%) → skip (code-enforced). Liquidity leaving → skip.
+- **Just pumped** (+40% or more in 6–24 h, near the high): don't open at market and don't put much above price;
+  place SOL below and let the pullback come (§9, §15.11). Expect a deep retrace.
+- **15m signals** (`chart_15m`): SuperTrend flipping bullish is the classic entry for a wide SOL range (§15.2);
+  RSI(2) > 90 with a close above the upper band or a first green MACD bar is the classic exit / don't-enter-now
+  signal. SuperTrend bearish with MACD falling = momentum down: a SOL range will fill on the way down.
+- **Dumped and now chopping sideways** with buyers still there → two-sided Bid-Ask (`bonus-stage`).
+- Regime: hot weeks are followed by rug weeks (§15.8); Friday evening and Saturday are thin (§15.11).
+
+### 18.4 Strategy menu (the `strategy` id the bot must pick)
+| id | When | Setup | Exit and management |
+|---|---|---|---|
+| `hot-spot` | busy pool (≥ $60K/h), ≥ 6 h, not falling, coin passes 18.1 | Spot from 0 to +5% above price down to −30…−60% (≈ 35–90 bins at step 100) | re-center when price runs above the range and flow is still hot; leave when 30-min volume dies; 12–24 h max |
+| `wide-sol-dump` | strong coin near its high, real volume, clean holders, 2%+ fee pool | SOL only, Spot (or Bid-Ask if a deep dump first is likely), −80…−95% | hold through the dump (the width is rug insurance); leave on the RSI(2)/band exit signal or when volume dies |
+| `bonus-stage` | dumped hard, now chopping sideways, still busy | two-sided Bid-Ask about −15…−35% / +15…+35% | take profit on the pump; if it bleeds below, close (the bot opens one layer only); move on when the chop ends |
+| `calm-curve` | calm, busy pool, price ranging | Curve about −10…−15% / +5…+10% | re-center when price leaves; leave when volume fades |
+| `fresh-tiny` | pool 1–12 h old that passes 18.1, fee ≥ 2% | Spot or Bid-Ask −85…−95%, SOL only | leave on liquidity leaving or the first big bounce; short max hold |
+| `custom` | none fits | say why in the reason | |
+Two-sided means the bot buys the token for the part above price (swap cost shown in OPTIONS).
+The bot cannot open token-only ranges or two-layer hybrids; for those, pick the nearest menu item or skip.
+
+### 18.5 Range and bins: read the OPTIONS table (§17.6)
+- Pick the range by **expected fees per hour vs the value lost if price drops 20%**. Narrow ranges earn
+  several times more per hour and lose more per dip. A setup that earns under ~0.1%/h at today's flow can't
+  pay for one ordinary pullback in a normal hold: skip or go narrower.
+- With our 1 SOL, ~30–90 bins (−15…−60% at step 100) is where it competes; −90% only as rug insurance for
+  `wide-sol-dump` / `fresh-tiny`, knowing it earns a fraction per hour.
+- Keep the part above price small (0 to +5%): ranges more than 15% above price did badly in the wallet study.
+- Bid-Ask near the top earns almost nothing until price falls into it; use it when a dump first is the expectation.
+
+### 18.6 Exits and triggers (§11, §15.7, §17.1, §17.3)
+- **Stop loss vs the range**: read `value_pct_if_price`. A stop tighter than what an ordinary 15–20% pullback
+  costs that range closes the trade on noise; that is wrong for a deep range by design. Tight stops only make
+  sense with narrow ranges.
+- **Volume dying** (cold_volume_30m around $5K, or a few × lower in a big pool) is the most reliable exit (§17.3).
+- **Max hold**: 12–24 h holds were the best bucket; over 24 h was the only losing one (§17.1).
+- **Take profit** is optional; fees are the edge, so don't cap a position that is still earning well.
+- Leave when the reason you entered is gone (§11): thesis broken, liquidity leaving, price far off Jupiter.
+
+### 18.7 Re-center, rebalance and re-open (§15.12, §17.1, §17.3)
+- **Re-center** = close + reopen at today's price. It costs the swap: selling the tokens the range picked up
+  (`selling_the_tokens_now_loses_pct`: the pool fee plus price impact) and buying any part above price again.
+  Re-center only when the hours of fees you expect in the new range clearly beat that cost.
+- **Price ran above the range** (position all SOL, earns nothing): re-center up if flow is still hot (what the
+  wallets did 35–71% of the time, within minutes); otherwise close.
+- **Price fell through the range** (all token): re-centering lower sells the bag at the bottom. Only re-center
+  down when the coin is now chopping (`bonus-stage` thinking) and still busy; otherwise hold if the thesis is
+  intact, or close.
+- In an uptrend, re-center up only (MCU-style, §15.12); chasing every dip down realises the loss each time.
+- **Re-open after a close**: set `revisit_after_min` by what would have to change (volume back, a new range,
+  a SuperTrend flip); 30–120 min for a hot pool that only cooled, a day for a coin you rejected on holders.
+
+### 18.8 Mistakes already made (don't repeat)
+- A −0.5% stop on a −90% range (Nothing-SOL): the stop sat inside ordinary noise for that range.
+- Two positions in one token (two LAUNCH pools): one campaign per token is now enforced.
+- Entering at market right after a +160% 6 h pump with part of the range above price.
+- Judging wide ranges by the old fee formula: 1 SOL over 236 bins earned ~0.04%/h, not ~0.2%/h.
+- Paying 0.07 SOL bin-array rent on a small position (fixed in code).
+

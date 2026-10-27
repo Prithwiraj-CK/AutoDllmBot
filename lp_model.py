@@ -1,5 +1,7 @@
-"""Position model shared by lp_trader.py: exact bins, value at any price, and fee share calibrated on what nine
-profitable wallets actually earned (knowledge base §17.2).
+"""Position model shared by lp_trader.py: exact bins, value at any price, and fee share. lp_trader uses the on-chain
+share (share_near: our SOL in the bins where price trades vs everyone's). The calibrated share below came from what nine
+profitable wallets actually earned (knowledge base §17.2); it ignores how many bins a position is spread over, so for
+a 1 SOL position over ~230 bins it credited 4-9x the fees the on-chain share gives.
 
 Prices are the token priced in SOL. Quote bins hold SOL, token bins hold tokens.
 """
@@ -59,3 +61,35 @@ def candle_fees_usd(bins, candle, pool_fees_usd, pos_usd, vol_1h_usd):
         return 0.0
     share = pos_usd / (pos_usd + L_A + L_B * vol_1h_usd)
     return pool_fees_usd * share * frac * density(bins, max(lo, bot), min(hi, top))
+
+
+# ---------- on-chain fee share (what lp_trader uses; the calibrated L above ignores how thin a wide range is) ----------
+def grid(price, step_bps):
+    """Index of a price on the pool's bin grid."""
+    return round(math.log(price) / math.log(1 + step_bps / 10000))
+
+
+def share_near(bins, step_bps, chain, live=False, width=1):
+    """Our share of the liquidity in the active bin and `width` bins each side, from on-chain bins
+    chain = {"price", "bins": [(id, price, liquidity in SOL)]}. A paper position isn't on chain, so ours is added."""
+    ours = {}
+    for b, k, a in bins:
+        g = grid(b, step_bps)
+        ours[g] = ours.get(g, 0.0) + (a if k == "q" else a * b)
+    act, o, t = grid(chain["price"], step_bps), 0.0, 0.0
+    for _, px, liq in chain["bins"]:
+        g = grid(px, step_bps)
+        if abs(g - act) <= width:
+            mine = ours.get(g, 0.0)
+            o, t = o + mine, t + liq + (0.0 if live else mine)
+    return o / t if t else 0.0
+
+
+def candle_fees_share(bins, candle, pool_fees_usd, share):
+    """Fees one 5m candle pays a position that holds `share` of the liquidity where price trades, scaled by the
+    part of the candle's range inside the position."""
+    bot, top = min(b for b, *_ in bins), max(b for b, *_ in bins)
+    lo, hi = candle["low"], candle["high"]
+    ov = max(0.0, min(hi, top) - max(lo, bot))
+    frac = ov / (hi - lo) if hi > lo else float(bot <= candle["close"] <= top)
+    return pool_fees_usd * share * frac

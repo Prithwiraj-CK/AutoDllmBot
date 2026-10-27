@@ -213,9 +213,11 @@ def strategy(p, candles):
 
 # ---------- chart ----------
 
-def chart(address, watermark="@SinClair_0000", badge=None, advisor=None):
+def chart(address, watermark="@SinClair_0000", badge=None, advisor=None, out_png="chart.png", label="example", show_setup=True):
     """badge: optional fn(pool) -> (label, colour) drawn top-right, e.g. a verdict.
-    advisor: optional fn(pool, candles) -> strategy dict that replaces the rule-of-thumb one (or None to keep it)."""
+    advisor: optional fn(pool, candles) -> strategy dict that replaces the rule-of-thumb one (or None to keep it).
+    out_png / label: where the image goes (other names skip chart_pool.json) and what the drawn range is called.
+    show_setup=False leaves the range and the setup panel off (e.g. when the advice is to skip)."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -278,12 +280,15 @@ def chart(address, watermark="@SinClair_0000", badge=None, advisor=None):
 
     # example LP range
     lo_p, hi_p = last * (1 + s["range_low_pct"] / 100), last * (1 + s["range_high_pct"] / 100)
-    ax.axhspan(lo_p, hi_p, color=band, alpha=0.13)
+    if not show_setup:
+        lo_p = hi_p = last
+    else:
+        ax.axhspan(lo_p, hi_p, color=band, alpha=0.13)
+        ax.text(0.01, lo_p, f" {label} {s['shape']} range {s['range_low_pct']}% → {s['range_high_pct']:+}%",
+                color=band, fontsize=8, va="bottom", ha="left", transform=ax.get_yaxis_transform())
     ax.axhline(last, color=accent, linestyle="--", linewidth=0.8)
-    ax.text(0.01, lo_p, f" example {s['shape']} range {s['range_low_pct']}% → {s['range_high_pct']:+}%",
-            color=band, fontsize=8, va="bottom", ha="left", transform=ax.get_yaxis_transform())
-    for price, label, col in ((last, "now", accent), (lo_p, "range low", band)):
-        ax.annotate(f"{label} {small_price(price)}", xy=(0.995, price), xycoords=("axes fraction", "data"),
+    for price, tag, col in ((last, "now", accent), (lo_p, "range low", band))[:2 if show_setup else 1]:
+        ax.annotate(f"{tag} {small_price(price)}", xy=(0.995, price), xycoords=("axes fraction", "data"),
                     fontsize=7.5, color=bg, weight="bold", va="center", ha="right", zorder=5,
                     bbox=dict(boxstyle="square,pad=0.25", fc=col, ec="none"))
     ymin = min(min(c["low"] for c in candles), lo_p) * 0.95
@@ -363,12 +368,12 @@ def chart(address, watermark="@SinClair_0000", badge=None, advisor=None):
             ("socials", " + ".join(k for k, v in (("site", fl.get("has_website")), ("X", fl.get("has_twitter"))) if v) or "none",
              None if fl.get("has_twitter") else down),
         ]),
-        ("EXAMPLE SETUP", [
+        (f"{label.upper()} SETUP", [
             ("shape", s["shape"], band), ("side", s["side"].replace(" price", ""), band),
             ("range", f"{s['range_low_pct']}% → {s['range_high_pct']:+}%", band),
             ("bins", f"~{s['bins']}", band),
         ]),
-    ]
+    ][:None if show_setup else -1]
     fig.add_artist(Rectangle((0.665, 0.06), 0.315, 0.86, transform=fig.transFigure, color=panel, zorder=-1))
     y = 0.89
     for title, rows in sections:
@@ -379,10 +384,10 @@ def chart(address, watermark="@SinClair_0000", badge=None, advisor=None):
             fig.text(0.965, y, v, color=col or fg, fontsize=8.5, ha="right", weight="bold")
             y -= 0.031
         y -= 0.012
-    if s["warnings"]:
+    if s["warnings"] and show_setup:
         fig.text(0.68, y, "⚠ " + " · ".join(s["warnings"][:3]), color=down, fontsize=7, wrap=True)
 
-    fig.text(0.06, 0.025, "example setup for research, not financial advice · data: Meteora, DexScreener, RugCheck",
+    fig.text(0.06, 0.025, (f"{label} setup for research, " if show_setup else "research, ") + "not financial advice · data: Meteora, DexScreener, RugCheck",
              color=dim, fontsize=7)
     if watermark:
         fig.text(0.98, 0.025, watermark, color=fg, fontsize=8, ha="right", weight="bold")
@@ -392,11 +397,14 @@ def chart(address, watermark="@SinClair_0000", badge=None, advisor=None):
                  bbox=dict(boxstyle="round,pad=0.35", fc=col, ec="none"))
 
     OUT.mkdir(exist_ok=True)
-    fig.savefig(OUT / "chart.png", facecolor=bg)
-    (OUT / "chart_pool.json").write_text(json.dumps(p, indent=2) + "\n")
-    print(f"chart -> out/chart.png ({p['name']}, {len(candles)} {tf} candles)")
+    fig.savefig(OUT / out_png, facecolor=bg)
+    plt.close(fig)
+    if out_png == "chart.png":
+        (OUT / "chart_pool.json").write_text(json.dumps(p, indent=2) + "\n")
+    print(f"chart -> out/{out_png} ({p['name']}, {len(candles)} {tf} candles)")
     print(f"strategy: {s['shape']}, {s['side']}, {s['range_low_pct']}%..{s['range_high_pct']:+}%, ~{s['bins']} bins; "
           f"warnings: {s['warnings']}")
+    return p
 
 
 def small_price(v):
