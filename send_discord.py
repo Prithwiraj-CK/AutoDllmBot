@@ -69,16 +69,23 @@ def send(payload, files=(), url=None):
 
 
 def main():
-    drafts = json.loads(DRAFTS.read_text()) if DRAFTS.exists() else []
-    if not drafts:
+    """Redirect: copy drafts.json into sinclair-x-bot and trigger its auto-poster.
+    The `send()`/`embed()`/`buttons()`/`lint()` helpers above stay available so
+    lp_bot.py / pool_watch.py / backtest_alerts.py keep working for LP alerts.
+    """
+    import shutil
+    import subprocess
+    target = Path("/Users/prithiraj/sinclair-x-bot")
+    if not DRAFTS.exists():
         print("No drafts to send")
         return
-    # Discord allows 10 embeds per message
-    for i in range(0, len(drafts), 10):
-        batch = drafts[i : i + 10]
-        content = f"**{len(drafts)} new reply draft{'s' if len(drafts) != 1 else ''}**" if i == 0 else None
-        send({"content": content, "embeds": [embed(d) for d in batch]})
-    print(f"Sent {len(drafts)} drafts to Discord")
+    (target / "out").mkdir(exist_ok=True)
+    shutil.copy2(DRAFTS, target / "out" / "drafts.json")
+    r = subprocess.run([sys.executable, "send_discord.py"], cwd=str(target), env=os.environ.copy())
+    sys.exit(r.returncode)
+
+
+import sys  # noqa: E402
 
 
 if __name__ == "__main__":

@@ -119,8 +119,19 @@ def holders(mint):
 
 
 def series(pool, kind, start, tf="5m", end=None):
-    d = get(f"{DATAPI}/pools/{pool}/{kind}?timeframe={tf}&start_time={int(start)}&end_time={int(end or time.time())}") or {}
-    return d.get("data") or []
+    """Candles or volume rows from start to end. 5m data comes in 6h pieces: the API refuses ranges over ~8h, and a
+    position that missed hours of marks (machine asleep) must still be able to catch up."""
+    end, out, seen = int(end or time.time()), [], set()
+    t0 = int(start)
+    while t0 < end:
+        t1 = min(t0 + 6 * 3600, end) if tf == "5m" else end
+        d = get(f"{DATAPI}/pools/{pool}/{kind}?timeframe={tf}&start_time={t0}&end_time={t1}") or {}
+        for row in d.get("data") or []:
+            if row["timestamp"] not in seen:
+                seen.add(row["timestamp"])
+                out.append(row)
+        t0 = t1
+    return sorted(out, key=lambda r: r["timestamp"])
 
 
 def signals_15m(done):
@@ -152,7 +163,7 @@ def market(pool):
     tok = y if flip else x
     now = time.time()
     px = lambda c: dict(c, open=1 / c["open"], close=1 / c["close"], high=1 / c["low"], low=1 / c["high"]) if flip else c
-    c5 = [px(c) for c in series(pool, "ohlcv", now - 12 * 3600, end=now - 6 * 3600 - 1) + series(pool, "ohlcv", now - 6 * 3600)]  # API max ~8h a call
+    c5 = [px(c) for c in series(pool, "ohlcv", now - 12 * 3600)]
     c1h = [px(c) for c in series(pool, "ohlcv", now - 25 * 3600, "1h")]
     vh = {v["timestamp"]: v for v in series(pool, "volume/history", now - 3 * 3600)}
     done = [c for c in c5 if c["timestamp"] + 300 <= now]
@@ -902,6 +913,13 @@ def main():
     STATE.write_text(json.dumps(state))
     print(f"lp trader started ({mode}), {len(state['open'])} open", flush=True)
     while True:
+        gap = time.time() - state.get("last_loop", time.time())
+        if gap > 15 * 60:  # the machine slept or the bot was down: nothing watched the positions
+            print(f"was offline {gap / 3600:.1f}h", flush=True)
+            if state["open"]:
+                post({"content": f"**{TAG} · ⚠️ bot was offline {gap / 3600:.1f}h** (computer asleep or stopped): "
+                                 f"{len(state['open'])} position(s) went unwatched, no stops or reviews ran. Catching up now."})
+        state["last_loop"] = time.time()
         for pos in list(state["open"].values()):
             try:
                 manage(pos, state, mode if pos["mode"] == "live" else "paper")
