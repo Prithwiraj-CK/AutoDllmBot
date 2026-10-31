@@ -98,11 +98,23 @@ def onchain(pool, n=3):
 
 def holders(mint):
     """Who holds the token (RugCheck full report): top holders without pools/lockers, linked-wallet networks, creator."""
+    def jupiter(err):
+        """RugCheck can't build a report for some new coins: Jupiter's audit gives the basics instead."""
+        try:
+            d = (get(f"https://lite-api.jup.ag/tokens/v2/search?query={mint}") or [{}])[0]
+        except Exception as e:
+            return {"error": f"{err}; jupiter: {str(e)[:60]}"}
+        a = d.get("audit") or {}
+        return {"source": "jupiter (rugcheck had no report)", "top10_pct": round(a.get("topHoldersPercentage") or 0, 1),
+                "dev_holds_pct": round(a.get("devBalancePercentage") or 0, 1), "dev_launched_tokens": a.get("devMints"),
+                "organic_score": d.get("organicScoreLabel"), "total_holders": d.get("holderCount"),
+                "linked_wallets": "unknown: no bundle data from this source"}
+
     def fetch():
         try:
             d = get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report") or {}
         except Exception as e:
-            return {"error": str(e)[:80]}
+            return jupiter(str(e)[:80])
         supply = (d.get("token") or {}).get("supply") or 0
         known = set(d.get("knownAccounts") or {})
         top = [h for h in d.get("topHolders") or [] if h.get("owner") not in known and h.get("address") not in known]
@@ -115,7 +127,10 @@ def holders(mint):
                 "linked_total_pct": pct(sum(n.get("currentHolding") or 0 for n in nets)),
                 "creator_holds_pct": pct(d.get("creatorBalance") or 0), "creator_other_tokens": len(d.get("creatorTokens") or []),
                 "rugged": d.get("rugged"), "total_holders": d.get("totalHolders")}
-    return cached(f"holders:{mint}", 3600, fetch)
+    r = cached(f"holders:{mint}", 3600, fetch)
+    if "error" in r:  # don't keep a failure for an hour
+        _cache.pop(f"holders:{mint}", None)
+    return r
 
 
 def series(pool, kind, start, tf="5m", end=None):
