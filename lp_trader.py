@@ -46,6 +46,7 @@ from pathlib import Path
 
 import lp_model as M
 import pool_watch as W
+import take_notifications as N
 from lp_bot import post, run_exec, wallet_sol
 from pool_watch import CLAUDE_BIN, DATAPI, KNOWLEDGE, QUOTES, SOL_MINT, get, load_dotenv
 from research import rugcheck
@@ -861,16 +862,34 @@ def plain(text):
     return W.strip_names(SECTION_REF.sub("", str(text or ""))).strip()
 
 
-def post_take(m, alert, decision):
+def take_route(alert):
+    return "scanner" if alert and str(alert.get("origin", "")).startswith("scanner") else "feed"
+
+
+def take_urls(route):
+    return W.scan_webhooks() if route == "scanner" else [u.strip() for u in os.getenv("POOL_WEBHOOK_URL", "").split(",") if u.strip()]
+
+
+def post_take(m, alert, decision, state, chain=None):
     """Alert card for the channels: pool research + chart of the AI's range + its decision. Never paper P&L."""
     if os.getenv("LP_TRADER_TAKES", "1") == "0":
         return
     import research
-    scanner = bool(alert) and str(alert.get("origin", "")).startswith("scanner")
-    urls = W.scan_webhooks() if scanner else [u.strip() for u in os.getenv("POOL_WEBHOOK_URL", "").split(",") if u.strip()]
+    route = take_route(alert)
+    scanner = route == "scanner"
+    urls = take_urls(route)
     if not urls:
         return
     enter_ = decision["action"] == "enter"
+    now = time.time()
+    recent = state.setdefault("take_cards", {}).get(m["mint"])
+    if not N.should_post(recent, decision["action"], m["vol_1h"], m.get("fee_tvl_1h_pct") or 0, now):
+        return
+    if not enter_ and os.getenv("LP_TRADER_SKIP_CARDS", "0") != "1":
+        N.queue_skip(state, m, decision, route)
+        state["take_cards"][m["mint"]] = {"t": now, "action": "skip", "vol": m["vol_1h"],
+                                            "fee": m.get("fee_tvl_1h_pct") or 0}
+        return
     plan = decision.get("plan") or {}
     ch = (plan.get("check") if enter_ else decision.get("check")) or {}
     png = f"take_{m['pool'][:8]}.png"
@@ -893,7 +912,17 @@ def post_take(m, alert, decision):
         t = plan["triggers"]
         take = [f"🟢 **AI take: LP it** · {MENU[plan['strategy']]} · confidence {plan.get('confidence')}",
                 f"**setup:** {setup_text(dict(plan, asked_lo=plan['lo']))} · {side_text(plan)}"
-                + (f" · pool quoted in {m['quote']}" if m.get("quote", "SOL") != "SOL" else ""), plain(plan["why"]), ""]
+                + (f" · pool quoted in {m['quote']} (stake swapped to the stable)" if m.get("quote", "SOL") != "SOL" else ""),
+                plain(plan["why"]), ""]
+        if alert and str(alert.get("origin", "")).startswith("wallets:"):
+            take.insert(2, f"**{alert['origin'].split(':', 1)[1].strip()}** in the last {os.getenv('WALLET_OPEN_WINDOW_H', '2')}h")
+        if chain:
+            bins = M.bins_layers(chain["price"], layers_of(plan), m["bin_step"], env("LP_TRADER_SIZE_SOL", 1.0) * qps(m.get("quote_mint")))
+            share = M.share_near(bins, m["bin_step"], chain)
+            fee_h = m["lp_fees_1h_usd"] * share / (env("LP_TRADER_SIZE_SOL", 1.0) * sol_usd()) * 100
+            drop = (M.value(bins, chain["price"] * 0.8) / M.value(bins, chain["price"]) - 1) * 100
+            take.insert(2, f"**if flow holds:** ~{fee_h:.3f}% fees/h · suggested hold up to {plan['triggers']['max_hold_h']:g}h "
+                           f"· value at −20% price {drop:+.1f}%")
         take += [f"{icon} **{k}:** {plain(ch[k])}" for icon, k in (("🪙", "coin"), ("🏊", "pool"), ("▶️", "entry"), ("🚪", "exit"),
                                                                   ("🔁", "rebalance"), ("⚠️", "against")) if ch.get(k)]
         take.append(f"👀 **the bot wakes up on:** a ±{t['wake_move_pct']:g}% move, 30-min volume under ${t['cold_volume_30m'] / 1e3:g}K, "
@@ -908,6 +937,15 @@ def post_take(m, alert, decision):
     payload["content"] = f"**🤖 {p['name']}** · AI take: {'LP it' if enter_ else 'skip'}" + (" · from the pool scanner" if scanner else "")
     try:
         W.post(payload, urls, chart=ROOT / "out" / png)
+        state["take_cards"][m["mint"]] = {"t": now, "action": decision["action"], "vol": m["vol_1h"],
+                                            "fee": m.get("fee_tvl_1h_pct") or 0}
+        if enter_:
+            state.setdefault("public_takes", []).append({"t": now, "pool": m["pool"], "mint": m["mint"],
+                "name": m["name"], "route": route, "action": "enter", "plan": plan, "price": chain["price"] if chain else m["price"],
+                "bin_step": m["bin_step"], "flip": m["flip"], "quote_mint": m.get("quote_mint"),
+                "size_sol": env("LP_TRADER_SIZE_SOL", 1.0), "stake_quote": env("LP_TRADER_SIZE_SOL", 1.0) * qps(m.get("quote_mint")),
+                "share": share if chain else None, "hold_h": min(12, plan["triggers"]["max_hold_h"]),
+                "exit_sent": False, "followed": False})
     except Exception as e:
         print(f"take post failed for {m['name']}: {e}", flush=True)
 
@@ -966,7 +1004,7 @@ def consider(pool, alert, state, mode):
     if (held and not alert) or not ai_budget(state, reserve=0.2, pace=not alert):
         return
     try:
-        _, opts = options(m, env("LP_TRADER_SIZE_SOL", 1.0))
+        chain, opts = options(m, env("LP_TRADER_SIZE_SOL", 1.0))
         decision, raw = ai_entry(m, opts, state, alert)
     except Exception as e:
         print(f"ai entry failed for {m['name']}: {e}", flush=True)
@@ -977,13 +1015,35 @@ def consider(pool, alert, state, mode):
         state["revisit"][pool] = time.time() + decision["revisit"] * 60
         print(f"ai skip {m['name']} (look again in {decision['revisit']}m): {decision['why']}", flush=True)
         if alert:
-            post_take(m, alert, decision)
+            post_take(m, alert, decision, state, chain)
         return
     why = "max open positions" if full else "already holds this token" if held else "daily loss limit" if lost else \
         enter(m, decision["plan"], state, mode, alert)
     print(f"ai {m['name']}: {why or 'entered'}", flush=True)
     if alert or not why:
-        post_take(m, alert, decision)
+        post_take(m, alert, decision, state, chain)
+
+
+def post_skip_digest(state):
+    due, day = N.digest_due(state, time.time())
+    if not due:
+        return
+    from send_discord import send
+    rows = state.get("skip_digest", [])
+    for route in ("feed", "scanner"):
+        lines = N.digest_lines([r for r in rows if r["route"] == route and time.time() - r["t"] <= 86400])
+        if not lines:
+            continue
+        payload = {"content": f"**🤖 AI skips · {day} IST**", "embeds": [{"description": "\n".join(lines)[:4000],
+                   "footer": {"text": "AI research, not financial advice"}, "color": 0x787B86}]}
+        for url in take_urls(route):
+            try:
+                send(payload, url=url)
+            except Exception as e:
+                print(f"skip digest failed: {e}", flush=True)
+                return
+    state["skip_digest"] = []
+    state["digest_day"] = day
 
 
 def migrate(state):
@@ -1070,6 +1130,7 @@ def main():
                 STATE.write_text(json.dumps(state))
         except Exception as e:
             print(f"candidate pass failed: {e}", flush=True)
+        post_skip_digest(state)
         if time.time() - state["last_status"] > env("LP_TRADER_STATUS_HOURS", 1.0) * 3600 or state.get("fee_note"):
             state["last_status"] = time.time()
             post_status(state)
