@@ -687,6 +687,20 @@ def finish(pos, state, reason, revisit_min=60):
               f"why: {reason}",
               f"total so far: {sum(x['pnl_sol'] for x in book):+.4f} SOL over {len(book)} campaign(s), "
               f"{sum(x['pnl_sol'] > 0 for x in book)} green"])}]})
+    from send_discord import send
+    for take in state.get("public_takes", []):
+        if take["pool"] != pos["pool"] or take.get("exit_sent") or take["t"] > c["exit_t"]:
+            continue
+        payload = {"content": f"**🤖 {W.strip_names(pos['name'])} · the AI would leave now**",
+                   "embeds": [{"description": f"[Pool](https://app.meteora.ag/dlmm/{pos['pool']}) · {plain(reason)}",
+                               "color": 0x787B86,
+                               "footer": {"text": "AI exit alert; research, not financial advice"}}]}
+        try:
+            for url in take_urls(take["route"]):
+                send(payload, url=url)
+            take["exit_sent"] = True
+        except Exception as e:
+            print(f"public exit post failed for {pos['name']}: {e}", flush=True)
 
 
 def enter(m, plan, state, mode, alert):
