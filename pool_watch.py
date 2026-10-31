@@ -434,10 +434,14 @@ def check_followups(state):
 DATAPI = "https://dlmm.datapi.meteora.ag"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 SCAN_EVERY = float(os.getenv("SCAN_EVERY_MIN", "5")) * 60
-SCAN_MAX_PER_HOUR = int(os.getenv("SCAN_MAX_PER_HOUR", "3"))
+SCAN_MAX_PER_HOUR = int(os.getenv("SCAN_MAX_PER_HOUR", "5"))
 SCAN_MIN_TVL = float(os.getenv("SCAN_MIN_TVL", "10000"))
 SCAN_MIN_VOL_1H = float(os.getenv("SCAN_MIN_VOL_1H", "30000"))
 SCAN_MIN_FEE_TVL_1H = float(os.getenv("SCAN_MIN_FEE_TVL_1H", "0.5"))  # % of TVL earned in fees in the last hour
+SCAN_STEADY_MIN_TVL = float(os.getenv("SCAN_STEADY_MIN_TVL", "5000"))
+SCAN_STEADY_MIN_VOL_1H = float(os.getenv("SCAN_STEADY_MIN_VOL_1H", "8000"))
+SCAN_STEADY_MIN_VOL_30M = float(os.getenv("SCAN_STEADY_MIN_VOL_30M", "2000"))
+SCAN_STEADY_MIN_FEE_TVL_1H = float(os.getenv("SCAN_STEADY_MIN_FEE_TVL_1H", "0.05"))
 
 
 def scan_webhooks():
@@ -449,30 +453,42 @@ def scan_webhooks():
 def scan_profile(pool):
     """(profile, why) if this pool looks like what the wallets enter, else None."""
     x, y, cfg = pool["token_x"], pool["token_y"], pool["pool_config"]
-    if SOL_MINT not in (x["address"], y["address"]) or pool.get("is_blacklisted"):
+    quote = next((a for a in (SOL_MINT, *sorted(QUOTES - {SOL_MINT}))
+                  if a in (x["address"], y["address"])), None)
+    if not quote or pool.get("is_blacklisted"):
         return None
-    tok = y if x["address"] == SOL_MINT else x
+    tok = y if x["address"] == quote else x
     if tok["address"] in QUOTES or tok.get("freeze_authority_disabled") is False:
         return None
-    if not (80 <= cfg["bin_step"] <= 125 and cfg["base_fee_pct"] >= 1):
+    if cfg["base_fee_pct"] < 1:
         return None
     vol, ft = pool.get("volume") or {}, pool.get("fee_tvl_ratio") or {}
-    if pool["tvl"] < SCAN_MIN_TVL or (vol.get("1h") or 0) < SCAN_MIN_VOL_1H or (ft.get("1h") or 0) < SCAN_MIN_FEE_TVL_1H:
-        return None
     now = time.time()
     age = (now - pool["created_at"] / 1000) / 3600
-    if age >= 168:
+    old = (quote == SOL_MINT and 80 <= cfg["bin_step"] <= 125 and age < 168
+           and pool["tvl"] >= SCAN_MIN_TVL and (vol.get("1h") or 0) >= SCAN_MIN_VOL_1H
+           and (ft.get("1h") or 0) >= SCAN_MIN_FEE_TVL_1H)
+    steady = (48 <= age <= 672 and 50 <= cfg["bin_step"] <= 250
+              and pool["tvl"] >= SCAN_STEADY_MIN_TVL
+              and (vol.get("1h") or 0) >= SCAN_STEADY_MIN_VOL_1H
+              and (vol.get("30m") or 0) >= SCAN_STEADY_MIN_VOL_30M
+              and (ft.get("1h") or 0) >= SCAN_STEADY_MIN_FEE_TVL_1H)
+    if not (old or steady):
         return None
     cs = (get(f"{DATAPI}/pools/{pool['address']}/ohlcv?timeframe=1h&start_time={int(now - 25 * 3600)}&end_time={int(now)}") or {}).get("data") or []
     if len(cs) < 2:
         return None
-    flip = x["address"] == SOL_MINT  # prices are Y per X; we want the token priced in SOL
+    flip = x["address"] == quote  # prices are Y per X; we want the token priced in its quote
     close = [1 / c["close"] if flip else c["close"] for c in cs]
     high = max(1 / c["low"] if flip else c["high"] for c in cs)
     chg = lambda h: (close[-1] / close[-1 - h] - 1) * 100 if len(close) > h else None
     c1, c24, off_high = chg(1), chg(24) if len(close) > 24 else (close[-1] / close[0] - 1) * 100, (close[-1] / high - 1) * 100
     why = (f"pool {age:.0f}h old · 1h {c1:+.0f}% · 24h {c24:+.0f}% · {off_high:+.0f}% from the 24h high · "
            f"1h vol ${vol['1h'] / 1e3:,.0f}K · 1h fees {ft['1h']:.1f}% of TVL · bin step {cfg['bin_step']} · base fee {cfg['base_fee_pct']:g}%")
+    if steady and (c1 or 0) >= -20 and off_high <= -15:
+        return "steady pool", why
+    if not old:
+        return None
     if age < 24 and (c1 or 0) >= 20:
         return "fresh pool pumping", why
     if age >= 24 and (vol.get("24h") or 0) >= 1_000_000 and c24 >= 50:
@@ -484,10 +500,11 @@ def scan_profile(pool):
 
 def scan_candidates():
     pools = {}
-    for sort in ("fee_tvl_ratio_1h:desc", "volume_1h:desc", "fee_tvl_ratio_30m:desc"):
-        d = get(f"{DATAPI}/pools?page_size=50&sort_by={sort}&filter_by=tvl%3E{int(SCAN_MIN_TVL)}") or {}
-        for pool in d.get("data") or []:
-            pools[pool["address"]] = pool
+    for sort in ("fee_tvl_ratio_1h:desc", "volume_1h:desc", "fee_tvl_ratio_30m:desc", "volume_30m:desc"):
+        for page in (1, 2):
+            d = get(f"{DATAPI}/pools?page={page}&page_size=50&sort_by={sort}&filter_by=tvl%3E{int(min(SCAN_MIN_TVL, SCAN_STEADY_MIN_TVL))}") or {}
+            for pool in d.get("data") or []:
+                pools[pool["address"]] = pool
     return sorted(pools.values(), key=lambda q: -((q.get("fee_tvl_ratio") or {}).get("1h") or 0))
 
 
@@ -541,7 +558,7 @@ def main():
             if len(scan_log) >= SCAN_MAX_PER_HOUR:
                 return
             addr = pool["address"]
-            tok = pool["token_y"] if pool["token_x"]["address"] == SOL_MINT else pool["token_x"]
+            tok = pool["token_y"] if pool["token_x"]["address"] in QUOTES else pool["token_x"]
             mint = tok["address"]
             if any(now - posted.get(k, 0) < repost_after or now - misses.get(k, 0) < NOT_FOUND_RETRY for k in (addr, mint)):
                 continue
