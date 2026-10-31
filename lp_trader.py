@@ -906,11 +906,12 @@ def post_take(m, alert, decision, state, chain=None):
     if not urls:
         return
     enter_ = decision["action"] == "enter"
+    legacy_skips = not enter_ and os.getenv("LP_TRADER_SKIP_CARDS", "0") == "1"
     now = time.time()
     recent = state.setdefault("take_cards", {}).get(m["mint"])
-    if not N.should_post(recent, decision["action"], m["vol_1h"], m.get("fee_tvl_1h_pct") or 0, now):
+    if not legacy_skips and not N.should_post(recent, decision["action"], m["vol_1h"], m.get("fee_tvl_1h_pct") or 0, now):
         return
-    if not enter_ and os.getenv("LP_TRADER_SKIP_CARDS", "0") != "1":
+    if not enter_ and not legacy_skips:
         N.queue_skip(state, m, dict(decision, why=plain(decision["why"])), route)
         state["take_cards"][m["mint"]] = {"t": now, "action": "skip", "vol": m["vol_1h"],
                                             "fee": m.get("fee_tvl_1h_pct") or 0}
