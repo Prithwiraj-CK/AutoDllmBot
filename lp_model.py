@@ -3,7 +3,8 @@ share (share_near: our SOL in the bins where price trades vs everyone's). The ca
 profitable wallets actually earned (knowledge base §17.2); it ignores how many bins a position is spread over, so for
 a 1 SOL position over ~230 bins it credited 4-9x the fees the on-chain share gives.
 
-Prices are the token priced in SOL. Quote bins hold SOL, token bins hold tokens.
+Prices are the token priced in the pool's quote (SOL, or USDC/USDT/JupUSD). Quote bins hold the quote, token bins
+hold tokens; amounts are in quote units.
 """
 import math
 
@@ -12,19 +13,31 @@ L_A, L_B = 30000.0, 0.3
 
 
 def bins_for(p0, lo_pct, hi_pct, step_bps, shape, sol):
-    """[(price, "q"|"t", amount)] for `sol` SOL placed from lo_pct below to hi_pct above p0."""
+    """[(price, "q"|"t", amount)] for `sol` quote placed from lo_pct to hi_pct around p0. hi_pct < 0 is a layer that
+    starts below price (the deep half of a two-layer setup); lo_pct = 0 < hi_pct is token only, above price."""
     g = 1 + step_bps / 10000
     nb = max(1, round(math.log(1 / (1 + lo_pct / 100)) / math.log(g))) if lo_pct < 0 else 0
+    skip = max(1, round(math.log(1 / (1 + hi_pct / 100)) / math.log(g))) if hi_pct < 0 else 1
     na = max(1, round(math.log(1 + hi_pct / 100) / math.log(g))) if hi_pct > 0 else 0
+    below_ix = list(range(skip, nb + 1))
 
     def weights(n, away_heavy):
         w = ([1.0] * n if shape == "Spot" else
              [i + 1.0 for i in range(n)] if (shape == "Bid-Ask") == away_heavy else [n - i + 0.0 for i in range(n)])
         s = sum(w)
         return [x / s for x in w]
-    below = sol if na == 0 else (0.0 if nb == 0 else sol * nb / (nb + na))
-    out = [(p0 * g ** -(i + 1), "q", below * w) for i, w in enumerate(weights(nb, True))]
+    nbl = len(below_ix)
+    below = sol if na == 0 else (0.0 if nbl == 0 else sol * nbl / (nbl + na))
+    out = [(p0 * g ** -i, "q", below * w) for i, w in zip(below_ix, weights(nbl, True))]
     out += [(p0 * g ** (i + 1), "t", (sol - below) * w / p0) for i, w in enumerate(weights(na, True))]
+    return out
+
+
+def bins_layers(p0, layers, step_bps, size):
+    """One position made of up to two layers [{"shape", "lo", "hi", "w"}], w = share of the size."""
+    out = []
+    for l in layers:
+        out += bins_for(p0, l["lo"], l["hi"], step_bps, l["shape"], size * l.get("w", 1.0))
     return out
 
 

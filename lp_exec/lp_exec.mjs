@@ -9,8 +9,10 @@
 //   node lp_exec.mjs open  <pool> <shape> <lo%> <hi%> <sol> [--simulate]
 //   node lp_exec.mjs close <pool> [--simulate]                  withdraw + close every position in the pool, sell the token for SOL
 //
-// Any alert setup opens: one-sided SOL (lo<0, hi=0), two-sided (lo<0<hi: the share of SOL above price is swapped to the token first) or
-// one-sided token (lo=0<hi: all of it swapped). Every transaction is simulated before it is sent; --simulate stops at
+// Any alert setup opens: one-sided SOL (lo<0, hi=0), a layer that starts below price (lo<hi<0), two-sided (lo<0<hi: the
+// share of SOL above price is swapped to the token first) or one-sided token (lo=0<hi: all of it swapped).
+// Read-only commands also work on pools quoted in USDC/USDT/JupUSD: prices and liquidity are then in that quote.
+// open and close trade SOL pairs only. Every transaction is simulated before it is sent; --simulate stops at
 // the first step. Env: LP_BOT_RPC_URL, LP_BOT_KEYPAIR (path to a keypair JSON file, never printed),
 // LP_BOT_SLIPPAGE_BPS (exit swap, default 300).
 import fs from "node:fs";
@@ -23,6 +25,8 @@ import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.j
 import BN from "bn.js";
 
 const SOL = "So11111111111111111111111111111111111111112";
+const USD_QUOTES = ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                    "JuprjznTrTSp2UFa3ZBUFgwdAmtZCq4MQCwysN55USD"];  // USDC, USDT, JupUSD
 const BIN_ARRAY_RENT = 0.07143744; // SOL, paid once by whoever first touches a bin array, not refunded
 const conn = new Connection(process.env.LP_BOT_RPC_URL || "https://api.mainnet-beta.solana.com", "confirmed");
 const [cmd, ...args] = process.argv.slice(2);
@@ -35,22 +39,28 @@ function wallet() {
   return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(path, "utf8"))));
 }
 
-async function pool(address) {
+// solIsX means "the quote is token X": SOL when the pool has it, else a USD stable (read-only use)
+async function pool(address, solOnly = false) {
   const dlmm = await DLMM.create(conn, new PublicKey(address));
-  const solIsX = dlmm.tokenX.publicKey.toBase58() === SOL;
-  if (!solIsX && dlmm.tokenY.publicKey.toBase58() !== SOL) out({ ok: false, error: "not a SOL pair" });
-  return { dlmm, solIsX, token: solIsX ? dlmm.tokenY : dlmm.tokenX };
+  const x = dlmm.tokenX.publicKey.toBase58(), y = dlmm.tokenY.publicKey.toBase58();
+  const solIsX = x === SOL || (y !== SOL && !solOnly && USD_QUOTES.includes(x));
+  const quote = solIsX ? dlmm.tokenX : dlmm.tokenY;
+  if (quote.publicKey.toBase58() !== SOL && (solOnly || !USD_QUOTES.includes(quote.publicKey.toBase58())))
+    out({ ok: false, error: solOnly ? "not a SOL pair (live trading is SOL pairs only)" : "no SOL or USD quote" });
+  return { dlmm, solIsX, token: solIsX ? dlmm.tokenY : dlmm.tokenX, qdec: quote.mint.decimals };
 }
 
 // The alert's range is in "token priced in SOL". SOL as token Y sits in the bins below the active bin; when SOL is
 // token X the pool price is inverted, so the same range sits above it.
 function binRange(dlmm, solIsX, lo, hi) {
-  if (lo > 0 || hi < 0 || (lo === 0 && hi === 0)) out({ ok: false, error: `bad range ${lo}%..${hi}%` });
+  if (lo > 0 || lo >= hi) out({ ok: false, error: `bad range ${lo}%..${hi}%` });
   const step = Math.log(1 + dlmm.lbPair.binStep / 10000);
   const below = lo < 0 ? Math.max(1, Math.round(Math.log(1 / (1 + lo / 100)) / step)) : 0;
   const above = hi > 0 ? Math.max(1, Math.round(Math.log(1 + hi / 100) / step)) : 0;
+  const skip = hi < 0 ? Math.max(1, Math.round(Math.log(1 / (1 + hi / 100)) / step)) : 0;  // a layer that starts below price
+  const top = hi < 0 ? -skip : above;
   const active = dlmm.lbPair.activeId;
-  return solIsX ? { minBinId: active - above, maxBinId: active + below } : { minBinId: active - below, maxBinId: active + above };
+  return solIsX ? { minBinId: active - top, maxBinId: active + below } : { minBinId: active - below, maxBinId: active + top };
 }
 
 const SHAPES = { "Spot": StrategyType.Spot, "Curve": StrategyType.Curve, "Bid-Ask": StrategyType.BidAsk };
@@ -76,9 +86,10 @@ async function missingBinArrays(dlmm, minBinId, maxBinId) {
 
 // A bin range back to the alert's terms: % from price for the token priced in SOL (inverse of binRange)
 function rangePct(dlmm, solIsX, minBinId, maxBinId) {
-  const g = 1 + dlmm.lbPair.binStep / 10000, below = dlmm.lbPair.activeId - minBinId, above = maxBinId - dlmm.lbPair.activeId;
-  const [down, up] = solIsX ? [above, below] : [below, above];
-  return { lo: down > 0 ? +((g ** -down - 1) * 100).toFixed(6) : 0, hi: up > 0 ? +((g ** up - 1) * 100).toFixed(6) : 0 };
+  const g = 1 + dlmm.lbPair.binStep / 10000, act = dlmm.lbPair.activeId;
+  const off = (id) => (solIsX ? act - id : id - act);  // bins from the active bin, in token-price terms (up = dearer)
+  const [a, b] = [off(minBinId), off(maxBinId)].sort((x, y) => x - y);
+  return { lo: +((g ** Math.min(a, 0) - 1) * 100).toFixed(6), hi: +((g ** b - 1) * 100).toFixed(6) };
 }
 
 async function plan(address, shape, lo, hi, sol) {
@@ -96,9 +107,9 @@ async function plan(address, shape, lo, hi, sol) {
 }
 
 async function quote(address, amount, side = "sell", ctx = null) {
-  const { dlmm, solIsX, token } = ctx || await pool(address);
+  const { dlmm, solIsX, token, qdec } = ctx || await pool(address);
   const buy = side === "buy";
-  const inDecimals = buy ? 9 : token.mint.decimals, outDecimals = buy ? token.mint.decimals : 9;
+  const inDecimals = buy ? qdec : token.mint.decimals, outDecimals = buy ? token.mint.decimals : qdec;
   const raw = new BN(Math.floor(Number(amount) * 10 ** inDecimals).toString());
   if (raw.isZero()) return { ok: true, out: 0, solOut: 0, priceImpactPct: 0 };
   const swapForY = buy ? solIsX : !solIsX; // X -> Y when we pay with whichever of SOL/token is X
@@ -135,7 +146,7 @@ async function send(tx, signers, label, log) {
 async function open(address, shape, lo, hi, sol) {
   if (!SHAPES.hasOwnProperty(shape)) out({ ok: false, error: `unknown shape ${shape}` });
   const user = wallet();
-  const ctx = await pool(address);
+  const ctx = await pool(address, true);
   const { dlmm, solIsX, token } = ctx;
   lo = Number(lo); hi = Number(hi);
   binRange(dlmm, solIsX, lo, hi); // validate before spending anything
@@ -184,7 +195,7 @@ async function open(address, shape, lo, hi, sol) {
 
 async function close(address) {
   const user = wallet();
-  const { dlmm, solIsX, token } = await pool(address);
+  const { dlmm, solIsX, token } = await pool(address, true);
   const log = [];
   try {
     const { userPositions } = await dlmm.getPositionsByUserAndLbPair(user.publicKey);
@@ -217,16 +228,16 @@ try {
   if (cmd === "plan") out(await plan(...args.slice(0, 5)));
   else if (cmd === "quote") { const { q, ...r } = await quote(args[0], args[1], args[2] || "sell"); out(r); }
   else if (cmd === "price") {
-    const { dlmm, solIsX, token } = await pool(args[0]);
+    const { dlmm, solIsX, token, qdec } = await pool(args[0]);
     const n = Number(args[1] || 0);
     const { activeBin, bins } = await dlmm.getBinsAroundActiveBin(n, n);
     const act = bins.find((b) => b.binId === activeBin) || (await dlmm.getActiveBin());
-    const inSol = (perToken) => (solIsX ? 1 / perToken : perToken); // token priced in SOL
-    const dx = 10 ** (solIsX ? 9 : token.mint.decimals), dy = 10 ** (solIsX ? token.mint.decimals : 9);
+    const inSol = (perToken) => (solIsX ? 1 / perToken : perToken); // token priced in the quote
+    const dx = 10 ** (solIsX ? qdec : token.mint.decimals), dy = 10 ** (solIsX ? token.mint.decimals : qdec);
     const r = { ok: true, activeId: activeBin, price: inSol(Number(act.pricePerToken)) };
     if (n) r.bins = bins.map((b) => {
       const px = Number(b.pricePerToken), x = Number(b.xAmount.toString()) / dx, y = Number(b.yAmount.toString()) / dy;
-      return [b.binId, inSol(px), solIsX ? x + y / px : y + x * px]; // [bin id, token price in SOL, liquidity in SOL]
+      return [b.binId, inSol(px), solIsX ? x + y / px : y + x * px]; // [bin id, token price, liquidity in quote units]
     });
     out(r);
   }

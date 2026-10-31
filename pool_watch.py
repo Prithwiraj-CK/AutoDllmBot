@@ -34,7 +34,7 @@ ADDRESS = re.compile(r"(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}(?![1
 # dexscreener links lowercase the address, so the regex above can't recover it; the API accepts it as-is
 DEX_LINK = re.compile(r"dexscreener\.com/solana/([0-9a-z]{32,44})", re.I)
 QUOTES = {"So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
+          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "JuprjznTrTSp2UFa3ZBUFgwdAmtZCq4MQCwysN55USD"}
 SKIP = QUOTES | {"11111111111111111111111111111111"}
 NOT_FOUND_RETRY = 6 * 3600
 MAX_MESSAGE_AGE = 3 * 3600  # after a restart the reader replays recent history; don't alert on stale mentions  # a token with no DLMM pool yet may get one later
