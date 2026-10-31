@@ -120,13 +120,20 @@ def holders(mint):
         top = [h for h in d.get("topHolders") or [] if h.get("owner") not in known and h.get("address") not in known]
         nets = sorted(d.get("insiderNetworks") or [], key=lambda n: -(n.get("currentHolding") or 0))
         pct = lambda a: round(a / supply * 100, 1) if supply else None
-        return {"top10_pct": round(sum(h.get("pct") or 0 for h in top[:10]), 1), "top1_pct": round(top[0].get("pct") or 0, 1) if top else None,
-                "flagged_insiders_in_top": sum(bool(h.get("insider")) for h in top),
-                "linked_wallets": d.get("graphInsidersDetected"),
-                "linked_networks": [{"wallets": n.get("size"), "hold_pct": pct(n.get("currentHolding") or 0)} for n in nets[:4]],
-                "linked_total_pct": pct(sum(n.get("currentHolding") or 0 for n in nets)),
-                "creator_holds_pct": pct(d.get("creatorBalance") or 0), "creator_other_tokens": len(d.get("creatorTokens") or []),
-                "rugged": d.get("rugged"), "total_holders": d.get("totalHolders")}
+        top10 = round(sum(h.get("pct") or 0 for h in top[:10]), 1)
+        out = {"top10_pct": top10, "top1_pct": round(top[0].get("pct") or 0, 1) if top else None,
+               "flagged_insiders_in_top": sum(bool(h.get("insider")) for h in top),
+               "linked_wallets": d.get("graphInsidersDetected"),
+               "linked_networks": [{"wallets": n.get("size"), "hold_pct": pct(n.get("currentHolding") or 0)} for n in nets[:4]],
+               "linked_total_pct": pct(sum(n.get("currentHolding") or 0 for n in nets)),
+               "creator_holds_pct": pct(d.get("creatorBalance") or 0), "creator_other_tokens": len(d.get("creatorTokens") or []),
+               "rugged": d.get("rugged"), "total_holders": d.get("totalHolders")}
+        # on older coins RugCheck's network figure counts tokens that passed through (GTA6: groups "holding" 95%
+        # while the whole top 10 held 16%; MET 265%): a group can't hold more than the top holders do
+        if any((n["hold_pct"] or 0) > top10 for n in out["linked_networks"]) or (out["linked_total_pct"] or 0) > 100:
+            out["linked_networks"], out["linked_total_pct"] = [], None
+            out["linked_note"] = "RugCheck's linked-wallet holdings don't fit the holder list (counts past transfers); not usable"
+        return out
     r = cached(f"holders:{mint}", 3600, fetch)
     if "error" in r:  # don't keep a failure for an hour
         _cache.pop(f"holders:{mint}", None)
