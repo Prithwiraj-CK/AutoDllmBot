@@ -958,6 +958,7 @@ def post_take(m, alert, decision, state, chain=None):
                 "name": m["name"], "route": route, "action": "enter", "plan": plan, "price": chain["price"] if chain else m["price"],
                 "bin_step": m["bin_step"], "flip": m["flip"], "quote_mint": m.get("quote_mint"),
                 "size_sol": env("LP_TRADER_SIZE_SOL", 1.0), "stake_quote": env("LP_TRADER_SIZE_SOL", 1.0) * qps(m.get("quote_mint")),
+                "quote_usd": quote_usd(m.get("quote_mint")),
                 "share": share if chain else None, "hold_h": min(12, plan["triggers"]["max_hold_h"]),
                 "exit_sent": False, "followed": False})
     except Exception as e:
@@ -1060,6 +1061,44 @@ def post_skip_digest(state):
     state["digest_day"] = day
 
 
+def post_take_followups(state):
+    import backtest_alerts as bt
+    from send_discord import send
+    now = time.time()
+    for take in state.get("public_takes", []):
+        if take.get("followed") or not take.get("share") or now < take["t"] + max(6, take["hold_h"]) * 3600:
+            continue
+        if now - take["t"] > 7 * 86400:
+            take["followed"] = True
+            continue
+        try:
+            end = take["t"] + take["hold_h"] * 3600 + 600
+            candles = bt.series(take["pool"], "ohlcv", take["t"] - 300, end)
+            if take["flip"]:
+                candles = [dict(c, open=1 / c["open"], close=1 / c["close"], high=1 / c["low"], low=1 / c["high"])
+                           for c in candles]
+            fees = {f["timestamp"]: max((f.get("fees") or 0) - (f.get("protocol_fees") or 0), 0)
+                    for f in bt.series(take["pool"], "volume/history", take["t"] - 300, end)}
+            result = N.simulate_take(take, candles, fees)
+            if not result:
+                continue
+            history = state.setdefault("take_results", [])
+            line = N.hit_rate(history + [{"t": now, **result}], now)
+            payload = {"content": f"**📊 {W.strip_names(take['name'])} · AI take check-in**",
+                       "embeds": [{"description": f"[Pool](https://app.meteora.ag/dlmm/{take['pool']}) · "
+                                   f"the posted setup over {take['hold_h']:g}h: **{result['pnl_pct']:+.2f}%** "
+                                   f"(fees {result['fee_pct']:+.2f}%, price {result['price_pct']:+.1f}%).\n{line}",
+                                   "color": 0x26A69A if result["pnl_pct"] > 0 else 0xEF5350,
+                                   "footer": {"text": "Simulation: real 5m candles and LP fees, fee share measured at entry and held fixed; "
+                                                      "excludes later liquidity changes, swaps, transaction costs and rent. Research, not financial advice."}}]}
+            for url in take_urls(take["route"]):
+                send(payload, url=url)
+            history.append({"t": now, "pool": take["pool"], **result})
+            take["followed"] = True
+        except Exception as e:
+            print(f"AI take followup failed for {take['pool']}: {e}", flush=True)
+
+
 def migrate(state):
     """One-off state fixes: old fee model (4-9x too generous), old schema."""
     for pos in state["open"].values():
@@ -1145,6 +1184,7 @@ def main():
         except Exception as e:
             print(f"candidate pass failed: {e}", flush=True)
         post_skip_digest(state)
+        post_take_followups(state)
         if time.time() - state["last_status"] > env("LP_TRADER_STATUS_HOURS", 1.0) * 3600 or state.get("fee_note"):
             state["last_status"] = time.time()
             post_status(state)
