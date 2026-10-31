@@ -576,6 +576,13 @@ def main():
     print(f"watching {log_path.relative_to(ROOT)} from byte {offset}", flush=True)
     track_state = {}
     while True:
+        if os.getenv("WALLET_OPENS", "1") != "0" and time.time() - track_state.get("last_wallet_poll", 0) >= float(os.getenv("WALLET_POLL_MIN", "10")) * 60:
+            try:
+                import wallet_opens
+                wallet_opens.poll(dry="--wallet-dry-run" in sys.argv)
+                track_state["last_wallet_poll"] = time.time()
+            except Exception as e:
+                print(f"wallet poll failed: {e}", flush=True)
         try:
             scan()
         except Exception as e:
