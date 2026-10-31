@@ -700,10 +700,14 @@ def finish(pos, state, reason, revisit_min=60):
                                "footer": {"text": "AI exit alert; research, not financial advice"}}]}
         try:
             for url in take_urls(take["route"]):
-                link_to_take = take.get("links", {}).get(hashlib.sha256(url.encode()).hexdigest())
+                url_id = hashlib.sha256(url.encode()).hexdigest()
+                if url_id in take.setdefault("exit_sent_urls", []):
+                    continue
+                link_to_take = take.get("links", {}).get(url_id)
                 if link_to_take:
                     payload["embeds"][0]["description"] += f" · [original AI take]({link_to_take})"
                 send(payload, url=url)
+                take["exit_sent_urls"].append(url_id)
                 payload["embeds"][0]["description"] = f"[Pool](https://app.meteora.ag/dlmm/{pos['pool']}) · {plain(reason)}"
             take["exit_sent"] = True
         except Exception as e:
@@ -1056,8 +1060,11 @@ def post_skip_digest(state):
     from send_discord import send
     rows = state.get("skip_digest", [])
     for route in ("feed", "scanner"):
+        if state.setdefault("digest_routes", {}).get(route) == day:
+            continue
         lines = N.digest_lines([r for r in rows if r["route"] == route and time.time() - r["t"] <= 86400])
         if not lines:
+            state["digest_routes"][route] = day
             continue
         payload = {"content": f"**🤖 AI skips · {day} IST**", "embeds": [{"description": "\n".join(lines)[:4000],
                    "footer": {"text": "AI research, not financial advice"}, "color": 0x787B86}]}
@@ -1067,6 +1074,7 @@ def post_skip_digest(state):
             except Exception as e:
                 print(f"skip digest failed: {e}", flush=True)
                 return
+        state["digest_routes"][route] = day
     state["skip_digest"] = []
     state["digest_day"] = day
 
@@ -1104,7 +1112,11 @@ def post_take_followups(state):
                                    "footer": {"text": "Simulation: real 5m candles and LP fees, fee share measured at entry and held fixed; "
                                                       "excludes later liquidity changes, swaps, transaction costs and rent. Research, not financial advice."}}]}
             for url in take_urls(take["route"]):
+                url_id = hashlib.sha256(url.encode()).hexdigest()
+                if url_id in take.setdefault("follow_sent_urls", []):
+                    continue
                 send(payload, url=url)
+                take["follow_sent_urls"].append(url_id)
             history.append({"t": now, "pool": take["pool"], **result})
             take["followed"] = True
         except Exception as e:

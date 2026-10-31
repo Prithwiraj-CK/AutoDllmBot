@@ -1,7 +1,9 @@
 """Watch public Meteora positions for new opens by the tracked wallets."""
 import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -17,6 +19,17 @@ WALLETS = (
 )
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "out" / "wallet_opens_state.json"
+_request_lock = threading.Lock()
+_last_request = 0.0
+
+
+def pace():
+    global _last_request
+    with _request_lock:
+        gap = float(os.getenv("WALLET_POLL_SLEEP_SEC", "0.15")) - (time.monotonic() - _last_request)
+        if gap > 0:
+            time.sleep(gap)
+        _last_request = time.monotonic()
 
 
 def api(path, params):
@@ -24,8 +37,8 @@ def api(path, params):
     url = w.DATAPI + path + "?" + urlencode(params)
     for attempt in range(3):
         try:
+            pace()
             result = w.get(url)
-            time.sleep(float(os.getenv("WALLET_POLL_SLEEP_SEC", "0.15")))
             return result or {}
         except Exception:
             if attempt == 2:
@@ -72,10 +85,10 @@ def poll(dry=False):
     import pool_watch as w
     now = time.time()
     old = json.loads(STATE.read_text()) if STATE.exists() else None
-    current = {}
-    for wallet in WALLETS:
-        current[wallet] = open_pools(wallet)
-        if dry:
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        current = dict(zip(WALLETS, pool.map(open_pools, WALLETS)))
+    if dry:
+        for wallet in WALLETS:
             print(f"tracked wallet …{wallet[-4:]}: {', '.join(sorted(current[wallet])) or 'no open pools'}", flush=True)
     if old is None:
         new = {"held": {a: sorted(b) for a, b in current.items()}, "events": {}, "alerted": {}}
