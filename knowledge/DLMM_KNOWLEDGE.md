@@ -611,6 +611,12 @@ The bot cannot open token-only ranges or two-layer hybrids; for those, pick the 
 - In an uptrend, re-center up only (MCU-style, §15.12); chasing every dip down realises the loss each time.
 - **Re-open after a close**: set `revisit_after_min` by what would have to change (volume back, a new range,
   a SuperTrend flip); 30–120 min for a hot pool that only cooled, a day for a coin you rejected on holders.
+- **Don't churn the same pool.** If you closed a pool because flow faded (volume under your exit line), only
+  re-enter when flow has clearly come back AND held: 30-min volume at least ~2x your old exit line for two
+  half-hours in a row, not one spike. A re-entry that would sit just above the line it was closed at will close
+  again within the hour at breakeven (HI-SOL, 30–31 Oct: three entries in 11h, each closed under $8K/30m within
+  0.5–1.1h, total −0.0002 SOL on 1 SOL: all of the fees went on the swaps). Set the exit line for a re-entry
+  with room under today's flow, not at the level the last trade died at.
 
 ### 18.8 Mistakes already made (don't repeat)
 - A −0.5% stop on a −90% range (Nothing-SOL) sat inside ordinary noise for that range. Cause: the bot read a stop
@@ -619,4 +625,6 @@ The bot cannot open token-only ranges or two-layer hybrids; for those, pick the 
 - Entering at market right after a +160% 6 h pump with part of the range above price.
 - Judging wide ranges by the old fee formula: 1 SOL over 236 bins earned ~0.04%/h, not ~0.2%/h.
 - Paying 0.07 SOL bin-array rent on a small position (fixed in code).
+- Re-entering HI-SOL three times just above the volume line it had closed at; each closed within an hour at
+  breakeven (see 18.7, don't churn).
 
