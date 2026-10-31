@@ -45,7 +45,7 @@ def open_pools(wallet):
             for n in range(1, 11):
                 data = api(f"/positions/{pool}/pnl", {"user": wallet, "status": "open", "page": n,
                                                        "page_size": 100, "days_back": 7})
-                if data.get("positions"):
+                if any(p.get("isClosed") is False and not p.get("closedAt") for p in data.get("positions") or []):
                     held.add(pool)
                 if not data.get("hasNext"):
                     break
@@ -76,7 +76,7 @@ def poll(dry=False):
     for wallet in WALLETS:
         current[wallet] = open_pools(wallet)
         if dry:
-            print(f"tracked wallet …{wallet[-4:]}: {len(current[wallet])} open pool(s)")
+            print(f"tracked wallet …{wallet[-4:]}: {', '.join(sorted(current[wallet])) or 'no open pools'}", flush=True)
     if old is None:
         new = {"held": {a: sorted(b) for a, b in current.items()}, "events": {}, "alerted": {}}
         fresh = []

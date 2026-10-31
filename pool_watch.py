@@ -246,16 +246,19 @@ def result_webhooks():
     return [] if raw.strip().lower() == "off" else [u.strip() for u in raw.split(",") if u.strip()]
 
 
-def post(payload, urls=None, chart=None):
+def post(payload, urls=None, chart=None, wait=False):
     """Send to every webhook in POOL_WEBHOOK_URL (comma-separated), or `urls`; one failing doesn't block the others."""
     from send_discord import send
     chart = chart or ROOT / "out" / "chart.png"
     urls = urls or [u.strip() for u in os.getenv("POOL_WEBHOOK_URL", "").split(",") if u.strip()]
     sent = 0
+    messages = {}
     for url in urls:
         for _ in range(5):
             try:
-                send(payload, [chart], url=url)
+                message = send(payload, [chart], url=url, wait=wait)
+                if message and all(message.get(k) for k in ("guild_id", "channel_id", "id")):
+                    messages[url] = f"https://discord.com/channels/{message['guild_id']}/{message['channel_id']}/{message['id']}"
                 sent += 1
                 break
             except urllib.error.HTTPError as e:
@@ -267,6 +270,7 @@ def post(payload, urls=None, chart=None):
             print(f"webhook …{url[-6:]} still rate-limited", flush=True)
     if not sent:
         raise RuntimeError("no webhook accepted the alert")
+    return messages
 
 
 def too_old(record):
@@ -468,10 +472,16 @@ def scan_profile(pool):
     old = (quote == SOL_MINT and 80 <= cfg["bin_step"] <= 125 and age < 168
            and pool["tvl"] >= SCAN_MIN_TVL and (vol.get("1h") or 0) >= SCAN_MIN_VOL_1H
            and (ft.get("1h") or 0) >= SCAN_MIN_FEE_TVL_1H)
+    v30 = vol.get("30m")
+    if (v30 is None and 48 <= age <= 672 and 50 <= cfg["bin_step"] <= 250
+            and pool["tvl"] >= SCAN_STEADY_MIN_TVL and (vol.get("1h") or 0) >= SCAN_STEADY_MIN_VOL_1H
+            and (ft.get("1h") or 0) >= SCAN_STEADY_MIN_FEE_TVL_1H):
+        d = get(f"{DATAPI}/pools/{pool['address']}/volume/history?timeframe=5m&start_time={int(now - 2100)}&end_time={int(now)}") or {}
+        v30 = sum((c.get("volume") or 0) for c in (d.get("data") or []) if c.get("timestamp", 0) + 300 <= now)
     steady = (48 <= age <= 672 and 50 <= cfg["bin_step"] <= 250
               and pool["tvl"] >= SCAN_STEADY_MIN_TVL
               and (vol.get("1h") or 0) >= SCAN_STEADY_MIN_VOL_1H
-              and (vol.get("30m") or 0) >= SCAN_STEADY_MIN_VOL_30M
+              and (v30 or 0) >= SCAN_STEADY_MIN_VOL_30M
               and (ft.get("1h") or 0) >= SCAN_STEADY_MIN_FEE_TVL_1H)
     if not (old or steady):
         return None
@@ -500,7 +510,7 @@ def scan_profile(pool):
 
 def scan_candidates():
     pools = {}
-    for sort in ("fee_tvl_ratio_1h:desc", "volume_1h:desc", "fee_tvl_ratio_30m:desc", "volume_30m:desc"):
+    for sort in ("fee_tvl_ratio_1h:desc", "volume_1h:desc", "fee_tvl_ratio_30m:desc", "volume_24h:desc"):
         for page in (1, 2):
             d = get(f"{DATAPI}/pools?page={page}&page_size=50&sort_by={sort}&filter_by=tvl%3E{int(min(SCAN_MIN_TVL, SCAN_STEADY_MIN_TVL))}") or {}
             for pool in d.get("data") or []:
@@ -510,6 +520,17 @@ def scan_candidates():
 
 def main():
     load_dotenv()
+    global SCAN_EVERY, SCAN_MAX_PER_HOUR, SCAN_MIN_TVL, SCAN_MIN_VOL_1H, SCAN_MIN_FEE_TVL_1H
+    global SCAN_STEADY_MIN_TVL, SCAN_STEADY_MIN_VOL_1H, SCAN_STEADY_MIN_VOL_30M, SCAN_STEADY_MIN_FEE_TVL_1H
+    SCAN_EVERY = float(os.getenv("SCAN_EVERY_MIN", "5")) * 60
+    SCAN_MAX_PER_HOUR = int(os.getenv("SCAN_MAX_PER_HOUR", "5"))
+    SCAN_MIN_TVL = float(os.getenv("SCAN_MIN_TVL", "10000"))
+    SCAN_MIN_VOL_1H = float(os.getenv("SCAN_MIN_VOL_1H", "30000"))
+    SCAN_MIN_FEE_TVL_1H = float(os.getenv("SCAN_MIN_FEE_TVL_1H", "0.5"))
+    SCAN_STEADY_MIN_TVL = float(os.getenv("SCAN_STEADY_MIN_TVL", "5000"))
+    SCAN_STEADY_MIN_VOL_1H = float(os.getenv("SCAN_STEADY_MIN_VOL_1H", "8000"))
+    SCAN_STEADY_MIN_VOL_30M = float(os.getenv("SCAN_STEADY_MIN_VOL_30M", "2000"))
+    SCAN_STEADY_MIN_FEE_TVL_1H = float(os.getenv("SCAN_STEADY_MIN_FEE_TVL_1H", "0.05"))
     log_path = ROOT / (os.getenv("DISCORD_MESSAGE_LOG") or "out/discord_messages.jsonl")
     repost_after = float(os.getenv("POOL_REPOST_HOURS", "24")) * 3600
     if not os.getenv("DRY_RUN") and not os.getenv("POOL_WEBHOOK_URL"):

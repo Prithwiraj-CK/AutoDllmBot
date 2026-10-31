@@ -36,6 +36,7 @@ LP_TRADER_MODEL (sonnet), LP_TRADER_LIVE, LP_BOT_LIVE_MAX_SOL (0.25), LP_BOT_RES
 LP_BOT_WEBHOOK_URL, POOL_WEBHOOK_URL, SCAN_WEBHOOK_URL, LP_TRADER_TAKES (1; 0 = don't post AI takes).
 """
 import json
+import hashlib
 import os
 import re
 import statistics
@@ -687,6 +688,8 @@ def finish(pos, state, reason, revisit_min=60):
               f"why: {reason}",
               f"total so far: {sum(x['pnl_sol'] for x in book):+.4f} SOL over {len(book)} campaign(s), "
               f"{sum(x['pnl_sol'] > 0 for x in book)} green"])}]})
+    if os.getenv("LP_TRADER_TAKES", "1") == "0":
+        return
     from send_discord import send
     for take in state.get("public_takes", []):
         if take["pool"] != pos["pool"] or take.get("exit_sent") or take["t"] > c["exit_t"]:
@@ -697,7 +700,11 @@ def finish(pos, state, reason, revisit_min=60):
                                "footer": {"text": "AI exit alert; research, not financial advice"}}]}
         try:
             for url in take_urls(take["route"]):
+                link_to_take = take.get("links", {}).get(hashlib.sha256(url.encode()).hexdigest())
+                if link_to_take:
+                    payload["embeds"][0]["description"] += f" · [original AI take]({link_to_take})"
                 send(payload, url=url)
+                payload["embeds"][0]["description"] = f"[Pool](https://app.meteora.ag/dlmm/{pos['pool']}) · {plain(reason)}"
             take["exit_sent"] = True
         except Exception as e:
             print(f"public exit post failed for {pos['name']}: {e}", flush=True)
@@ -900,7 +907,7 @@ def post_take(m, alert, decision, state, chain=None):
     if not N.should_post(recent, decision["action"], m["vol_1h"], m.get("fee_tvl_1h_pct") or 0, now):
         return
     if not enter_ and os.getenv("LP_TRADER_SKIP_CARDS", "0") != "1":
-        N.queue_skip(state, m, decision, route)
+        N.queue_skip(state, m, dict(decision, why=plain(decision["why"])), route)
         state["take_cards"][m["mint"]] = {"t": now, "action": "skip", "vol": m["vol_1h"],
                                             "fee": m.get("fee_tvl_1h_pct") or 0}
         return
@@ -950,7 +957,7 @@ def post_take(m, alert, decision, state, chain=None):
     payload = W.breakdown(p, take)
     payload["content"] = f"**🤖 {p['name']}** · AI take: {'LP it' if enter_ else 'skip'}" + (" · from the pool scanner" if scanner else "")
     try:
-        W.post(payload, urls, chart=ROOT / "out" / png)
+        message_links = W.post(payload, urls, chart=ROOT / "out" / png, wait=enter_)
         state["take_cards"][m["mint"]] = {"t": now, "action": decision["action"], "vol": m["vol_1h"],
                                             "fee": m.get("fee_tvl_1h_pct") or 0}
         if enter_:
@@ -960,6 +967,7 @@ def post_take(m, alert, decision, state, chain=None):
                 "size_sol": env("LP_TRADER_SIZE_SOL", 1.0), "stake_quote": env("LP_TRADER_SIZE_SOL", 1.0) * qps(m.get("quote_mint")),
                 "quote_usd": quote_usd(m.get("quote_mint")),
                 "share": share if chain else None, "hold_h": min(12, plan["triggers"]["max_hold_h"]),
+                "links": {hashlib.sha256(url.encode()).hexdigest(): link for url, link in message_links.items()},
                 "exit_sent": False, "followed": False})
     except Exception as e:
         print(f"take post failed for {m['name']}: {e}", flush=True)
@@ -1040,6 +1048,8 @@ def consider(pool, alert, state, mode):
 
 
 def post_skip_digest(state):
+    if os.getenv("LP_TRADER_TAKES", "1") == "0":
+        return
     due, day = N.digest_due(state, time.time())
     if not due:
         return
@@ -1062,6 +1072,8 @@ def post_skip_digest(state):
 
 
 def post_take_followups(state):
+    if os.getenv("LP_TRADER_TAKES", "1") == "0":
+        return
     import backtest_alerts as bt
     from send_discord import send
     now = time.time()
@@ -1190,6 +1202,9 @@ def main():
             post_status(state)
         state["revisit"] = {k: v for k, v in state["revisit"].items() if v > time.time()}
         state["seen_alerts"] = {k: v for k, v in state["seen_alerts"].items() if v > time.time() - 7 * 86400}
+        state["take_cards"] = {k: v for k, v in state.get("take_cards", {}).items() if v["t"] > time.time() - 2 * 86400}
+        state["public_takes"] = [v for v in state.get("public_takes", []) if v["t"] > time.time() - 8 * 86400]
+        state["take_results"] = [v for v in state.get("take_results", []) if v["t"] > time.time() - 7 * 86400]
         STATE.write_text(json.dumps(state))
         if "--once" in sys.argv:
             break

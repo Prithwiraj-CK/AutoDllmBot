@@ -1,4 +1,6 @@
 import take_notifications as n
+import pool_watch as w
+import send_discord
 
 
 def test_mint_card_dedupe_and_material_change():
@@ -27,3 +29,9 @@ def test_followup_math_uses_posted_range_and_measured_share():
     assert result["price_pct"] == 0
     assert result["fee_pct"] > 0
     assert result["pnl_pct"] > 0
+
+
+def test_take_message_link_from_webhook_response(monkeypatch):
+    monkeypatch.setattr(send_discord, "send", lambda *a, **k: {"guild_id": "1", "channel_id": "2", "id": "3"})
+    assert w.post({"content": "test"}, urls=["https://example.invalid/hook"], wait=True) == {
+        "https://example.invalid/hook": "https://discord.com/channels/1/2/3"}

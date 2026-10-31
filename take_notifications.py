@@ -40,8 +40,8 @@ def digest_lines(rows):
 
 def hit_rate(results, now):
     xs = [r["pnl_pct"] for r in results if now - r["t"] <= 7 * 86400]
-    return (f"AI calls last 7 days: {sum(x > 0 for x in xs)} of {len(xs)} green, "
-            f"median {statistics.median(xs):+.1f}%") if xs else "AI calls last 7 days: no completed simulations yet"
+    return (f"AI LP-it calls last 7 days: {sum(x > 0 for x in xs)} of {len(xs)} green, "
+            f"median {statistics.median(xs):+.1f}%") if xs else "AI LP-it calls last 7 days: no completed simulations yet"
 
 
 def simulate_take(take, candles, fees):

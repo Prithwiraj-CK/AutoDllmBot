@@ -42,11 +42,11 @@ def embed(d):
     }
 
 
-def send(payload, files=(), url=None):
+def send(payload, files=(), url=None, wait=False):
     """POST to the webhook (default DISCORD_WEBHOOK_URL). `files` are local paths sent as attachments (multipart)."""
     if os.getenv("DRY_RUN"):
         print(json.dumps(payload, indent=2, ensure_ascii=False), *(f"[attach {f}]" for f in files))
-        return
+        return None
     if files:
         boundary = "sinclairxbotboundary"
         parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\n'
@@ -59,13 +59,17 @@ def send(payload, files=(), url=None):
         ctype = f"multipart/form-data; boundary={boundary}"
     else:
         data, ctype = json.dumps(payload).encode(), "application/json"
+    target = url or os.environ["DISCORD_WEBHOOK_URL"]
+    if wait:
+        target += ("&" if "?" in target else "?") + "wait=true"
     req = urllib.request.Request(
-        url or os.environ["DISCORD_WEBHOOK_URL"],
+        target,
         data=data,
         headers={"Content-Type": ctype, "User-Agent": "sinclair-x-bot"},
         method="POST",
     )
-    urllib.request.urlopen(req, timeout=60).read()
+    data = urllib.request.urlopen(req, timeout=60).read()
+    return json.loads(data) if wait and data else None
 
 
 def main():
